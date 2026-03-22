@@ -1,0 +1,46 @@
+# Gradle
+/.gradle/
+**/.gradle/
+**/build/
+**/out/
+**/.kotlin/
+
+# IntelliJ / Android Studio
+/.idea/
+**/.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android
+**/local.properties
+**/captures/
+**/.externalNativeBuild/
+**/.cxx/
+*.apk
+*.ap_
+*.aab
+*.keystore
+*.jks
+keystore.properties
+
+# Kotlin/Compose/Serialization
+**/*.class
+**/*.log
+
+# .NET (there is a csproj in the repo)
+**/bin/
+**/obj/
+
+# OS / tooling noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea_modules/
+.project
+.classpath
+.settings/
+/.tmp/
+**/.tmp/
+

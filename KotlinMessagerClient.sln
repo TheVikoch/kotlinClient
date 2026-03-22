@@ -1,0 +1,29 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "KotlinMessagerClient", "KotlinMessagerClient", "{527519AC-6EB8-313A-DE89-2E72091EE690}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessengerClient", "KotlinMessagerClient\MessengerClient.csproj", "{E184C711-5036-0761-B62D-13D093808193}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E184C711-5036-0761-B62D-13D093808193}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E184C711-5036-0761-B62D-13D093808193}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E184C711-5036-0761-B62D-13D093808193}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E184C711-5036-0761-B62D-13D093808193}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{E184C711-5036-0761-B62D-13D093808193} = {527519AC-6EB8-313A-DE89-2E72091EE690}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E1F39FF4-5A63-4D10-8B9E-56E59D0F599E}
+	EndGlobalSection
+EndGlobal
