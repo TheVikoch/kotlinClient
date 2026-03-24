@@ -1,4 +1,4 @@
-package com.messenger.client.media
+﻿package com.messenger.client.media
 
 import android.Manifest
 import android.content.ContentResolver
@@ -28,6 +28,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -73,6 +74,7 @@ import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -190,6 +192,8 @@ private data class EditorSnapshot(
     val cropRect: Rect,
     val shapes: List<Shape>
 )
+
+private val PickerAccent = Color(0xFF4F6FF0)
 
 private data class PointerMapping(
     val displayRect: Rect,
@@ -310,7 +314,15 @@ actual fun AttachmentPicker(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Button(onClick = { permissionLauncher.launch(requiredPermissions) }) {
+                Button(
+                    onClick = { permissionLauncher.launch(requiredPermissions) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PickerAccent,
+                        contentColor = Color.White,
+                        disabledContainerColor = PickerAccent.copy(alpha = 0.5f),
+                        disabledContentColor = Color.White.copy(alpha = 0.7f)
+                    )
+                ) {
                     Text("Разрешить доступ")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -353,7 +365,9 @@ actual fun AttachmentPicker(
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { systemPicker.launch(arrayOf("*/*")) },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    border = BorderStroke(1.dp, PickerAccent),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = PickerAccent)
                 ) {
                     Text("Открыть системный проводник")
                 }
@@ -445,8 +459,8 @@ actual fun AttachmentPicker(
 
 @Composable
 private fun TabButton(active: Boolean, label: String, onClick: () -> Unit) {
-    val bg = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val bg = if (active) PickerAccent else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
     TextButton(
         onClick = onClick,
         modifier = Modifier
@@ -516,12 +530,12 @@ private fun MediaGrid(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(6.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                            .background(PickerAccent, CircleShape)
                     ) {
                         Icon(
                             Icons.Filled.Check,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
+                            tint = Color.White,
                             modifier = Modifier.padding(4.dp)
                         )
                     }
@@ -566,7 +580,7 @@ private fun FileList(
                         Icons.Filled.Folder,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = PickerAccent
                     )
                     Spacer(modifier = Modifier.size(8.dp))
                     Column {
@@ -586,7 +600,7 @@ private fun FileList(
                     Icon(
                         Icons.Filled.Check,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = PickerAccent
                     )
                 }
             }
@@ -665,20 +679,6 @@ private fun MediaGridSections(
                             )
                         }
                     } else {
-                        IconButton(
-                            onClick = { onEdit(item) },
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(4.dp)
-                                .background(Color.Black.copy(alpha = 0.4f), CircleShape)
-                        ) {
-                            Icon(
-                                Icons.Filled.Edit,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
@@ -689,7 +689,7 @@ private fun MediaGridSections(
                             Icon(
                                 Icons.Filled.Check,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = PickerAccent,
                                 modifier = Modifier.padding(4.dp)
                             )
                         }
@@ -699,12 +699,12 @@ private fun MediaGridSections(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(6.dp)
-                                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                .background(PickerAccent, CircleShape)
                         ) {
                             Text(
                                 text = "${index + 1}",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                color = Color.White,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
@@ -760,7 +760,7 @@ private fun FileListSections(
                             Icons.Filled.Folder,
                             contentDescription = null,
                             modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = PickerAccent
                         )
                         Spacer(modifier = Modifier.size(8.dp))
                         Column {
@@ -779,13 +779,13 @@ private fun FileListSections(
                     if (isSelected) {
                         Box(
                             modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                .background(PickerAccent, CircleShape)
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                         ) {
                             Text(
                                 text = "${index + 1}",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onPrimary
+                                color = Color.White
                             )
                         }
                     }
@@ -861,8 +861,8 @@ private fun FilterChip(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     onClick: () -> Unit
 ) {
-    val bg = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val bg = if (active) PickerAccent else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(18.dp))
@@ -905,14 +905,20 @@ private fun BottomActionBar(
                 Text(
                     text = "Очистить",
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = PickerAccent,
                     modifier = Modifier.clickable { onClear() }
                 )
             }
         }
         Button(
             onClick = onSend,
-            enabled = selectedCount > 0
+            enabled = selectedCount > 0,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = PickerAccent,
+                contentColor = Color.White,
+                disabledContainerColor = PickerAccent.copy(alpha = 0.5f),
+                disabledContentColor = Color.White.copy(alpha = 0.7f)
+            )
         ) {
             Text("Отправить")
         }
@@ -980,7 +986,7 @@ private fun ImageEditorDialog(
 
     val palette = listOf(
         Color.White,
-        Color(0xFF00C853),
+        Color(0xFF4F6FF0),
         Color(0xFFFFC107),
         Color(0xFFFF5252),
         Color(0xFF40C4FF),
@@ -2059,3 +2065,5 @@ private fun formatFileSize(size: Long): String {
         else -> "$size Б"
     }
 }
+
+

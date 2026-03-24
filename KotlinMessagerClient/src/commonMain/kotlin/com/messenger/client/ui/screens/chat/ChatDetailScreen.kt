@@ -1,7 +1,8 @@
-package com.messenger.client.ui.screens.chat
+﻿package com.messenger.client.ui.screens.chat
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,10 +16,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -28,6 +31,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -36,6 +40,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -111,6 +117,24 @@ fun ChatDetailScreen(
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
     val listState = rememberLazyListState()
+    val chatBackground = Color(0xFFF6F7FB)
+    val chatAccent = Color(0xFF4F6FF0)
+    val bubbleColors = ChatBubbleColors(
+        ownBubble = chatAccent,
+        otherBubble = Color.White,
+        ownText = Color.White,
+        otherText = Color(0xFF1F2937),
+        ownMeta = Color.White.copy(alpha = 0.72f),
+        otherMeta = Color(0xFF64748B),
+        bubbleBorder = Color(0xFFE2E8F0)
+    )
+    val inputBorder = Color(0xFFD1D7E2)
+    val inputColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = chatAccent,
+        unfocusedBorderColor = inputBorder,
+        focusedLabelColor = chatAccent,
+        cursorColor = chatAccent
+    )
 
     fun parseInstantOrNull(value: String): Instant? {
         if (value.isBlank()) return null
@@ -340,7 +364,8 @@ fun ChatDetailScreen(
                                         id = init.attachmentId,
                                         fileName = file.name,
                                         contentType = file.contentType,
-                                        size = file.bytes.size.toLong()
+                                        size = file.bytes.size.toLong(),
+                                        previewBytes = if (file.contentType.startsWith("image/")) file.bytes else null
                                     )
                                 },
                                 onFailure = { error ->
@@ -505,6 +530,7 @@ fun ChatDetailScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(chatBackground)
             .padding(16.dp)
     ) {
         Row(
@@ -564,7 +590,7 @@ fun ChatDetailScreen(
                             TypingIndicatorText(
                                 prefix = typingPrefix,
                                 textStyle = MaterialTheme.typography.bodySmall.copy(
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = chatAccent
                                 )
                             )
                         }
@@ -627,6 +653,8 @@ fun ChatDetailScreen(
                             isOwn = message.senderId == authState.getUserId(),
                             isRead = readMessageIds.contains(message.id),
                             timeLabel = formatTime(message.sentAt),
+                            showSenderName = conversationState.type == "group",
+                            colors = bubbleColors,
                             onReply = { replyToMessage = it },
                             apiService = apiService,
                             token = token
@@ -703,21 +731,41 @@ fun ChatDetailScreen(
                         )
                     }
                     pendingAttachments.forEach { attachment ->
+                        val isImage = attachment.contentType.startsWith("image/")
+                        val previewBitmap = if (isImage && attachment.previewBytes != null) {
+                            remember(attachment.id, attachment.previewBytes) {
+                                decodeImage(attachment.previewBytes)
+                            }
+                        } else {
+                            null
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            val label = if (attachment.contentType.startsWith("image/")) {
+                            if (previewBitmap != null) {
+                                androidx.compose.foundation.Image(
+                                    bitmap = previewBitmap,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                            val label = if (isImage) {
                                 "Фото: ${attachment.fileName}"
                             } else {
                                 "Файл: ${attachment.fileName}"
                             }
-                            Text(
-                                text = "$label • ${formatFileSize(attachment.size)}",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "$label • ${formatFileSize(attachment.size)}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                             IconButton(onClick = { removePendingAttachment(attachment.id) }) {
                                 Icon(
                                     Icons.Filled.Close,
@@ -731,48 +779,64 @@ fun ChatDetailScreen(
             }
         }
 
-        Row(
+        Card(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            shape = RoundedCornerShape(18.dp)
         ) {
-            IconButton(
-                onClick = { showAttachmentPicker = true }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Filled.AttachFile,
-                    contentDescription = "Прикрепить файл"
-                )
-            }
-            OutlinedTextField(
-                value = newMessage,
-                onValueChange = { value ->
-                    newMessage = value
-                },
-                label = { Text("Сообщение") },
-                modifier = Modifier.weight(1f),
-                maxLines = 4
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            Button(
-                onClick = {
-                    if (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) {
-                        sendMessage(newMessage, replyToMessage?.id)
-                    }
-                },
-                enabled = (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading && !isUploading
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.height(18.dp),
-                        strokeWidth = 2.dp
-                    )
-                } else {
+                IconButton(
+                    onClick = { showAttachmentPicker = true }
+                ) {
                     Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Отправить"
+                        Icons.Filled.AttachFile,
+                        contentDescription = "Прикрепить файл"
                     )
+                }
+                OutlinedTextField(
+                    value = newMessage,
+                    onValueChange = { value ->
+                        newMessage = value
+                    },
+                    label = { Text("Сообщение") },
+                    modifier = Modifier.weight(1f),
+                    maxLines = 4,
+                    colors = inputColors
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Button(
+                    onClick = {
+                        if (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                            sendMessage(newMessage, replyToMessage?.id)
+                        }
+                    },
+                    enabled = (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading && !isUploading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = chatAccent,
+                        contentColor = Color.White,
+                        disabledContainerColor = chatAccent.copy(alpha = 0.5f),
+                        disabledContentColor = Color.White.copy(alpha = 0.7f)
+                    )
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.height(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Отправить"
+                        )
+                    }
                 }
             }
         }
@@ -842,7 +906,18 @@ private data class PendingAttachment(
     val id: String,
     val fileName: String,
     val contentType: String,
-    val size: Long
+    val size: Long,
+    val previewBytes: ByteArray?
+)
+
+private data class ChatBubbleColors(
+    val ownBubble: Color,
+    val otherBubble: Color,
+    val ownText: Color,
+    val otherText: Color,
+    val ownMeta: Color,
+    val otherMeta: Color,
+    val bubbleBorder: Color
 )
 
 private fun formatFileSize(size: Long): String {
@@ -861,6 +936,8 @@ private fun MessageBubble(
     isOwn: Boolean,
     isRead: Boolean,
     timeLabel: String,
+    showSenderName: Boolean,
+    colors: ChatBubbleColors,
     onReply: (MessageDto) -> Unit,
     apiService: ApiService,
     token: String?
@@ -873,6 +950,11 @@ private fun MessageBubble(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = if (isOwn) Arrangement.End else Arrangement.Start
         ) {
+            val bubbleShape = if (isOwn) {
+                RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomEnd = 6.dp, bottomStart = 18.dp)
+            } else {
+                RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomEnd = 18.dp, bottomStart = 6.dp)
+            }
             Card(
                 modifier = Modifier
                     .widthIn(max = maxBubbleWidth)
@@ -895,31 +977,34 @@ private fun MessageBubble(
                             }
                         )
                     },
-                shape = RoundedCornerShape(16.dp),
+                shape = bubbleShape,
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isOwn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-                )
+                    containerColor = if (isOwn) colors.ownBubble else colors.otherBubble
+                ),
+                border = if (isOwn) null else BorderStroke(1.dp, colors.bubbleBorder),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp)
                 ) {
-                    val senderLabel = message.sender.displayName.ifBlank {
-                        message.sender.email
-                    }.ifBlank { "Неизвестно" }
-                    Text(
-                        text = senderLabel,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 12.sp,
-                        color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-                    )
+                    if (showSenderName) {
+                        val senderLabel = message.sender.displayName.ifBlank {
+                            message.sender.email
+                        }.ifBlank { "Неизвестно" }
+                        Text(
+                            text = senderLabel,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 12.sp,
+                            color = if (isOwn) colors.ownText else colors.otherText
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
 
                     if (message.replyToMessageId != null) {
-                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "Ответ",
                             fontSize = 10.sp,
-                            color = if (isOwn) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            color = if (isOwn) colors.ownMeta else colors.otherMeta
                         )
                     }
 
@@ -929,7 +1014,7 @@ private fun MessageBubble(
                         Text(
                             text = message.content,
                             fontSize = 14.sp,
-                            color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                            color = if (isOwn) colors.ownText else colors.otherText
                         )
                     }
 
@@ -958,15 +1043,14 @@ private fun MessageBubble(
                         Text(
                             text = timeLabel,
                             fontSize = 10.sp,
-                            color = if (isOwn) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            color = if (isOwn) colors.ownMeta else colors.otherMeta
                         )
                         if (isOwn) {
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = if (isRead) "✓✓" else "✓",
                                 fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                color = colors.ownMeta
                             )
                         }
                     }
@@ -1132,3 +1216,4 @@ private fun AttachmentPreview(
         }
     }
 }
+
