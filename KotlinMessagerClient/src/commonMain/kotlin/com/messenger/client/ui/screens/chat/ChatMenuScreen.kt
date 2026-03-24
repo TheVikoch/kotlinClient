@@ -49,9 +49,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
+import com.messenger.client.models.MessageAttachmentDto
+import com.messenger.client.models.MessageDto
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.ui.components.TypingIndicatorText
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +70,7 @@ fun ChatMenuScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var unreadCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var typingByConversation by remember { mutableStateOf<Map<String, Map<String, String>>>(emptyMap()) }
+    var lastMessagePreviews by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showCreatePersonalDialog by remember { mutableStateOf(false) }
     var showCreateGroupDialog by remember { mutableStateOf(false) }
     var showCreateMenu by remember { mutableStateOf(false) }
@@ -89,6 +93,59 @@ fun ChatMenuScreen(
                 ?: parseInstantOrNull(conversation.createdAt)
                 ?: Instant.DISTANT_PAST
         })
+    }
+
+    fun buildAttachmentPreview(attachments: List<MessageAttachmentDto>): String? {
+        if (attachments.isEmpty()) return null
+        val images = attachments.filter { it.contentType.lowercase().startsWith("image/") }
+        val videos = attachments.filter { it.contentType.lowercase().startsWith("video/") }
+        val files = attachments.filterNot {
+            val type = it.contentType.lowercase()
+            type.startsWith("image/") || type.startsWith("video/")
+        }
+        return when {
+            files.isNotEmpty() -> files.firstOrNull()?.fileName?.ifBlank { "Файл" } ?: "Файл"
+            images.isNotEmpty() && videos.isEmpty() -> {
+                if (images.size == 1) "Фото" else "${images.size} фото"
+            }
+            videos.isNotEmpty() && images.isEmpty() -> {
+                if (videos.size == 1) "Видео" else "${videos.size} видео"
+            }
+            images.isNotEmpty() || videos.isNotEmpty() -> {
+                val total = images.size + videos.size
+                if (total == 1) "Медиа" else "$total медиа"
+            }
+            else -> "Вложение"
+        }
+    }
+
+    fun buildMessagePreview(message: MessageDto): String? {
+        val content = message.content.replace("\n", " ").trim()
+        if (content.isNotBlank()) return content
+        val fromAttachments = buildAttachmentPreview(message.attachments)
+        return fromAttachments
+    }
+
+    fun fetchMissingPreviews(items: List<ConversationDto>) {
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) return@launch
+            val updates = mutableMapOf<String, String>()
+            for (conversation in items) {
+                if (!conversation.lastMessageContent.isNullOrBlank()) continue
+                val result = apiService.getMessages(currentToken, conversation.id, limit = 1)
+                result.onSuccess { response ->
+                    val lastMessage = response.messages.lastOrNull()
+                    val preview = lastMessage?.let { buildMessagePreview(it) }
+                    if (!preview.isNullOrBlank()) {
+                        updates[conversation.id] = preview
+                    }
+                }
+            }
+            if (updates.isNotEmpty()) {
+                lastMessagePreviews = lastMessagePreviews + updates
+            }
+        }
     }
 
     fun refreshUnreadCounts(items: List<ConversationDto>) {
@@ -123,6 +180,7 @@ fun ChatMenuScreen(
                     val sorted = sortConversations(convs)
                     conversations = sorted
                     refreshUnreadCounts(sorted)
+                    fetchMissingPreviews(sorted)
                     if (webSocketService.isConnected) {
                         sorted.forEach { webSocketService.joinConversation(it.id) }
                     }
@@ -145,12 +203,13 @@ fun ChatMenuScreen(
             val message = event.message
             val conversationId = message.conversationId
             val currentId = authState.getUserId()
+            val previewOverride = buildMessagePreview(message)
 
             val updated = conversations.map { conversation ->
                 if (conversation.id == conversationId) {
                     conversation.copy(
                         lastMessageAt = message.sentAt,
-                        lastMessageContent = message.content
+                        lastMessageContent = previewOverride ?: message.content
                     )
                 } else {
                     conversation
@@ -162,6 +221,10 @@ fun ChatMenuScreen(
                 conversations = sortConversations(updated)
             } else {
                 loadConversations()
+            }
+
+            if (!previewOverride.isNullOrBlank()) {
+                lastMessagePreviews = lastMessagePreviews + (conversationId to previewOverride)
             }
 
             if (currentId.isNullOrBlank() || message.senderId != currentId) {
@@ -331,11 +394,15 @@ fun ChatMenuScreen(
             ) {
                 items(conversations) { conversation ->
                     val typingNames = typingByConversation[conversation.id]?.values?.toSet().orEmpty()
-                    val typingText = if (typingNames.isNotEmpty()) {
-                        if (typingNames.size == 1) {
-                            "${typingNames.first()} печатает..."
+                    val typingPrefix = if (typingNames.isNotEmpty()) {
+                        if (conversation.type == "group") {
+                            val names = typingNames.filter { it.isNotBlank() }
+                            val capped = names.take(3)
+                            val base = capped.joinToString(", ")
+                            val label = if (names.size > 3) "$base и др." else base
+                            if (label.isBlank()) "" else "$label "
                         } else {
-                            "Печатают..."
+                            ""
                         }
                     } else {
                         null
@@ -346,7 +413,8 @@ fun ChatMenuScreen(
                         currentUserId = currentUserId,
                         currentUserEmail = currentUserEmail,
                         hasUnread = hasUnread,
-                        typingText = typingText,
+                        typingPrefix = typingPrefix,
+                        previewOverride = lastMessagePreviews[conversation.id],
                         onClick = { onOpenChat(conversation) }
                     )
                 }
@@ -411,7 +479,8 @@ private fun ConversationCard(
     currentUserId: String?,
     currentUserEmail: String?,
     hasUnread: Boolean,
-    typingText: String?,
+    typingPrefix: String?,
+    previewOverride: String?,
     onClick: () -> Unit
 ) {
     fun formatLastTime(value: String?): String? {
@@ -497,24 +566,33 @@ private fun ConversationCard(
                 }
             }
 
-            val preview = typingText ?: conversation.lastMessageContent
-                ?.replace("\n", " ")
-                ?.trim()
-                ?.let { text ->
-                    if (text.length > 16) {
+    val preview = (previewOverride ?: conversation.lastMessageContent)
+        ?.replace("\n", " ")
+        ?.trim()
+        ?.let { text ->
+            if (text.length > 16) {
                         text.take(13) + "..."
                     } else {
                         text
                     }
                 }
-            if (!preview.isNullOrBlank()) {
+            if (!preview.isNullOrBlank() || typingPrefix != null) {
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = preview,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    fontStyle = if (typingText != null) FontStyle.Italic else FontStyle.Normal
-                )
+                if (typingPrefix != null) {
+                    TypingIndicatorText(
+                        prefix = typingPrefix,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            color = MaterialTheme.colorScheme.primary,
+                            fontStyle = FontStyle.Italic
+                        )
+                    )
+                } else if (!preview.isNullOrBlank()) {
+                    Text(
+                        text = preview,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
             }
         }
     }

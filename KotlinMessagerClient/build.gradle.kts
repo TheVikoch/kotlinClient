@@ -69,6 +69,16 @@ kotlin {
                 implementation("com.microsoft.signalr:signalr:7.0.14")
                 implementation("io.reactivex.rxjava3:rxjava:3.1.8")
                 implementation("com.google.code.gson:gson:2.10.1")
+                val osName = System.getProperty("os.name").lowercase()
+                val javafxClassifier = when {
+                    osName.contains("win") -> "win"
+                    osName.contains("mac") -> "mac"
+                    else -> "linux"
+                }
+                implementation("org.openjfx:javafx-base:21.0.2:$javafxClassifier")
+                implementation("org.openjfx:javafx-graphics:21.0.2:$javafxClassifier")
+                implementation("org.openjfx:javafx-media:21.0.2:$javafxClassifier")
+                implementation("org.openjfx:javafx-swing:21.0.2:$javafxClassifier")
             }
         }
         val jvmTest by getting {

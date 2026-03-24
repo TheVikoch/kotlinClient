@@ -1,5 +1,6 @@
 package com.messenger.client.ui.screens.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -20,7 +22,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -45,15 +49,28 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
+import com.messenger.client.models.MessageAttachmentDto
 import com.messenger.client.models.MessageDto
+import com.messenger.client.media.FullScreenVideo
+import com.messenger.client.media.InlineVideo
+import com.messenger.client.media.PickedFile
+import com.messenger.client.media.ZoomableImage
+import com.messenger.client.media.AttachmentPicker
+import com.messenger.client.media.buildAttachmentCacheKey
+import com.messenger.client.media.decodeImage
+import com.messenger.client.media.rememberFileOpener
+import com.messenger.client.media.rememberMediaCache
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.ui.components.TypingIndicatorText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -75,6 +92,11 @@ fun ChatDetailScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var newMessage by remember { mutableStateOf("") }
     var replyToMessage by remember { mutableStateOf<MessageDto?>(null) }
+    var pendingAttachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
+    var isUploading by remember { mutableStateOf(false) }
+    var uploadQueue by remember { mutableStateOf<List<PickedFile>>(emptyList()) }
+    var isQueueActive by remember { mutableStateOf(false) }
+    var showAttachmentPicker by remember { mutableStateOf(false) }
     var unreadCount by remember { mutableStateOf(0) }
     var readMessageIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var typingUsers by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -192,12 +214,19 @@ fun ChatDetailScreen(
                 return@launch
             }
 
-            val result = apiService.sendMessage(currentToken, conversationState.id, content, replyToMessageId)
+            val result = apiService.sendMessage(
+                currentToken,
+                conversationState.id,
+                content,
+                replyToMessageId,
+                pendingAttachments.map { it.id }
+            )
             result.fold(
                 onSuccess = { message ->
                     messages = normalizeMessages(messages + message)
                     newMessage = ""
                     replyToMessage = null
+                    pendingAttachments = emptyList()
                 },
                 onFailure = { error ->
                     errorMessage = error.message ?: "Не удалось отправить сообщение"
@@ -274,6 +303,90 @@ fun ChatDetailScreen(
                 }
             }
         }
+    }
+
+    fun uploadAttachment(file: PickedFile) {
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                errorMessage = "Нет авторизации"
+                return@launch
+            }
+            isUploading = true
+            val initResult = apiService.initUpload(
+                currentToken,
+                conversationState.id,
+                file.name,
+                file.contentType,
+                file.bytes.size.toLong()
+            )
+            initResult.fold(
+                onSuccess = { init ->
+                    val uploadResult = apiService.uploadToPresignedUrl(
+                        init.uploadUrl,
+                        file.bytes,
+                        file.contentType
+                    )
+                    uploadResult.fold(
+                        onSuccess = {
+                            val completeResult = apiService.completeUpload(
+                                currentToken,
+                                conversationState.id,
+                                init.attachmentId
+                            )
+                            completeResult.fold(
+                                onSuccess = {
+                                    pendingAttachments = pendingAttachments + PendingAttachment(
+                                        id = init.attachmentId,
+                                        fileName = file.name,
+                                        contentType = file.contentType,
+                                        size = file.bytes.size.toLong()
+                                    )
+                                },
+                                onFailure = { error ->
+                                    errorMessage = error.message ?: "Не удалось завершить загрузку"
+                                }
+                            )
+                        },
+                        onFailure = { error ->
+                            errorMessage = error.message ?: "Не удалось загрузить файл"
+                        }
+                    )
+                },
+                onFailure = { error ->
+                    errorMessage = error.message ?: "Не удалось инициализировать загрузку"
+                }
+            )
+            isUploading = false
+        }
+    }
+
+    fun enqueueUploads(files: List<PickedFile>) {
+        if (files.isEmpty()) return
+        uploadQueue = uploadQueue + files
+        if (isQueueActive) return
+        isQueueActive = true
+        scope.launch {
+            while (uploadQueue.isNotEmpty()) {
+                val next = uploadQueue.first()
+                uploadQueue = uploadQueue.drop(1)
+                uploadAttachment(next)
+                var started = false
+                var ticks = 0
+                while (true) {
+                    if (isUploading) started = true
+                    if (started && !isUploading) break
+                    if (!started && ticks > 40) break
+                    delay(50)
+                    ticks++
+                }
+            }
+            isQueueActive = false
+        }
+    }
+
+    fun removePendingAttachment(id: String) {
+        pendingAttachments = pendingAttachments.filterNot { it.id == id }
     }
 
     LaunchedEffect(conversationState.id) {
@@ -424,22 +537,37 @@ fun ChatDetailScreen(
                         fontSize = 18.sp,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Text(
-                        text = "Участников: ${conversationState.members.size}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                    if (typingUsers.isNotEmpty()) {
-                        val typingLabel = typingUsers.values
-                            .filter { it.isNotBlank() }
-                            .distinct()
-                            .joinToString(", ")
-                            .ifBlank { "Собеседник" }
+                    if (conversationState.type == "group") {
                         Text(
-                            text = "$typingLabel печатает...",
+                            text = "Участников: ${conversationState.members.size}",
                             fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
+                    }
+                    val typingNames = typingUsers.values
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                    val typingPrefix = if (typingNames.isNotEmpty()) {
+                        if (conversationState.type == "group") {
+                            val capped = typingNames.take(3)
+                            val base = capped.joinToString(", ")
+                            val label = if (typingNames.size > 3) "$base и др." else base
+                            if (label.isBlank()) "" else "$label "
+                        } else {
+                            ""
+                        }
+                    } else {
+                        null
+                    }
+                    Box(modifier = Modifier.height(16.dp)) {
+                        if (typingPrefix != null) {
+                            TypingIndicatorText(
+                                prefix = typingPrefix,
+                                textStyle = MaterialTheme.typography.bodySmall.copy(
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -499,7 +627,9 @@ fun ChatDetailScreen(
                             isOwn = message.senderId == authState.getUserId(),
                             isRead = readMessageIds.contains(message.id),
                             timeLabel = formatTime(message.sentAt),
-                            onReply = { replyToMessage = it }
+                            onReply = { replyToMessage = it },
+                            apiService = apiService,
+                            token = token
                         )
                     }
                 }
@@ -554,10 +684,65 @@ fun ChatDetailScreen(
             }
         }
 
+        if (pendingAttachments.isNotEmpty() || isUploading) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (isUploading) {
+                        Text(
+                            text = "Загрузка...",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                    pendingAttachments.forEach { attachment ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            val label = if (attachment.contentType.startsWith("image/")) {
+                                "Фото: ${attachment.fileName}"
+                            } else {
+                                "Файл: ${attachment.fileName}"
+                            }
+                            Text(
+                                text = "$label • ${formatFileSize(attachment.size)}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            IconButton(onClick = { removePendingAttachment(attachment.id) }) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Убрать файл",
+                                    modifier = Modifier.height(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = { showAttachmentPicker = true }
+            ) {
+                Icon(
+                    Icons.Filled.AttachFile,
+                    contentDescription = "Прикрепить файл"
+                )
+            }
             OutlinedTextField(
                 value = newMessage,
                 onValueChange = { value ->
@@ -572,11 +757,11 @@ fun ChatDetailScreen(
 
             Button(
                 onClick = {
-                    if (newMessage.isNotBlank()) {
+                    if (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) {
                         sendMessage(newMessage, replyToMessage?.id)
                     }
                 },
-                enabled = newMessage.isNotBlank() && !isLoading
+                enabled = (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading && !isUploading
             ) {
                 if (isLoading) {
                     CircularProgressIndicator(
@@ -592,6 +777,19 @@ fun ChatDetailScreen(
             }
         }
     }
+
+    AttachmentPicker(
+        show = showAttachmentPicker,
+        onDismiss = { showAttachmentPicker = false },
+        onPicked = { files ->
+            showAttachmentPicker = false
+            enqueueUploads(files)
+        },
+        onError = { error ->
+            showAttachmentPicker = false
+            errorMessage = error
+        }
+    )
 
     if (showAddMemberDialog) {
         AlertDialog(
@@ -640,13 +838,32 @@ fun ChatDetailScreen(
     }
 }
 
+private data class PendingAttachment(
+    val id: String,
+    val fileName: String,
+    val contentType: String,
+    val size: Long
+)
+
+private fun formatFileSize(size: Long): String {
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    return when {
+        size >= mb -> String.format("%.1f МБ", size / mb)
+        size >= kb -> String.format("%.1f КБ", size / kb)
+        else -> "$size Б"
+    }
+}
+
 @Composable
 private fun MessageBubble(
     message: MessageDto,
     isOwn: Boolean,
     isRead: Boolean,
     timeLabel: String,
-    onReply: (MessageDto) -> Unit
+    onReply: (MessageDto) -> Unit,
+    apiService: ApiService,
+    token: String?
 ) {
     var hasTriggered by remember { mutableStateOf(false) }
     var dragTotal by remember { mutableStateOf(0f) }
@@ -708,11 +925,28 @@ private fun MessageBubble(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    Text(
-                        text = message.content,
-                        fontSize = 14.sp,
-                        color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-                    )
+                    if (message.content.isNotBlank()) {
+                        Text(
+                            text = message.content,
+                            fontSize = 14.sp,
+                            color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    if (message.attachments.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            message.attachments.forEach { attachment ->
+                                AttachmentPreview(
+                                    attachment = attachment,
+                                    conversationId = message.conversationId,
+                                    messageId = message.id,
+                                    apiService = apiService,
+                                    token = token
+                                )
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(6.dp))
 
@@ -738,6 +972,163 @@ private fun MessageBubble(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentPreview(
+    attachment: MessageAttachmentDto,
+    conversationId: String,
+    messageId: String,
+    apiService: ApiService,
+    token: String?
+) {
+    val normalizedType = attachment.contentType.lowercase()
+    val isImage = normalizedType.startsWith("image/")
+    val isVideo = normalizedType.startsWith("video/")
+    val cache = rememberMediaCache()
+    val openFile = rememberFileOpener()
+    val cacheKey = remember(attachment.id, messageId, attachment.fileName) {
+        buildAttachmentCacheKey(conversationId, messageId, attachment.id, attachment.fileName)
+    }
+    val cachedPath = remember(cacheKey) { cache.getPath(cacheKey) }
+    var cachedBytes by remember(cacheKey, isImage) {
+        mutableStateOf(if (isImage) cache.readBytes(cacheKey) else null)
+    }
+    var isCached by remember(cacheKey) { mutableStateOf(cache.exists(cacheKey)) }
+    var isDownloading by remember(cacheKey) { mutableStateOf(false) }
+    var failed by remember(attachment.id, messageId) { mutableStateOf(false) }
+    var showFull by remember(attachment.id, messageId) { mutableStateOf(false) }
+    var openFailed by remember(attachment.id, messageId) { mutableStateOf(false) }
+
+    LaunchedEffect(cacheKey, token) {
+        if (isCached) {
+            if (isImage && cachedBytes == null) {
+                cachedBytes = cache.readBytes(cacheKey)
+            }
+            return@LaunchedEffect
+        }
+        if (token.isNullOrBlank() || isDownloading) return@LaunchedEffect
+        isDownloading = true
+        val urlResult = apiService.getMediaUrl(token, conversationId, messageId, attachment.id)
+        urlResult.fold(
+            onSuccess = { response ->
+                val downloadResult = apiService.downloadMediaBytes(response.url)
+                downloadResult.fold(
+                    onSuccess = { bytes ->
+                        cache.writeBytes(cacheKey, bytes)
+                        isCached = true
+                        if (isImage) {
+                            cachedBytes = bytes
+                        }
+                    },
+                    onFailure = { failed = true }
+                )
+            },
+            onFailure = { failed = true }
+        )
+        isDownloading = false
+    }
+
+    if (isVideo) {
+        when {
+            isCached -> InlineVideo(
+                path = cachedPath,
+                muted = true,
+                modifier = Modifier.clip(RoundedCornerShape(12.dp)),
+                onClick = { showFull = true }
+            )
+            failed -> Text(
+                text = "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РІРёРґРµРѕ",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            else -> Text(
+                text = "Р—Р°РіСЂСѓР·РєР° РІРёРґРµРѕ...",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        if (showFull && isCached) {
+            FullScreenVideo(
+                path = cachedPath,
+                onDismiss = { showFull = false }
+            )
+        }
+    } else if (isImage) {
+        val bitmap = cachedBytes?.let { decodeImage(it) }
+        when {
+            bitmap != null -> {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 240.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { showFull = true },
+                    contentScale = ContentScale.Crop
+                )
+            }
+            failed -> Text(
+                text = "Не удалось загрузить фото",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            else -> Text(
+                text = "Загрузка фото...",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        if (showFull && bitmap != null) {
+            ZoomableImage(
+                content = {
+                    androidx.compose.foundation.Image(
+                        bitmap = bitmap,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.Fit
+                    )
+                },
+                onDismiss = { showFull = false }
+            )
+        }
+    } else {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val label = "Файл: ${attachment.fileName} • ${formatFileSize(attachment.size)}"
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+            )
+            IconButton(
+                onClick = {
+                    openFailed = if (isCached) {
+                        !openFile(cachedPath, attachment.contentType)
+                    } else {
+                        true
+                    }
+                },
+                enabled = isCached
+            ) {
+                Icon(
+                    Icons.Filled.OpenInNew,
+                    contentDescription = "Открыть файл"
+                )
+            }
+        }
+        if (openFailed) {
+            Text(
+                text = "Не удалось открыть файл",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error
+            )
         }
     }
 }

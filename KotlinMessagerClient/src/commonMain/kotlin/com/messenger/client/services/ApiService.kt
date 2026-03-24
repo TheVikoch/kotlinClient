@@ -6,6 +6,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
@@ -196,13 +197,14 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         token: String,
         conversationId: String,
         content: String,
-        replyToMessageId: String? = null
+        replyToMessageId: String? = null,
+        attachmentIds: List<String> = emptyList()
     ): Result<MessageDto> {
         return try {
             val response = client.post("$serverUrl/api/messages") {
                 contentType(ContentType.Application.Json)
                 header("Authorization", "Bearer $token")
-                setBody(SendMessageDto(conversationId, content, replyToMessageId))
+                setBody(SendMessageDto(conversationId, content, replyToMessageId, attachmentIds))
             }
             if (response.status.isSuccess()) {
                 Result.success(response.body())
@@ -262,6 +264,99 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
             } else {
                 Result.failure(Exception("Mark as read failed: ${response.status}"))
             }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun initUpload(
+        token: String,
+        conversationId: String,
+        fileName: String,
+        contentType: String,
+        size: Long
+    ): Result<InitUploadResponseDto> {
+        return try {
+            val response = client.post("$serverUrl/api/media/init") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(InitUploadRequestDto(conversationId, fileName, contentType, size))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(Exception("Init upload failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun completeUpload(
+        token: String,
+        conversationId: String,
+        attachmentId: String
+    ): Result<Unit> {
+        return try {
+            val response = client.post("$serverUrl/api/media/complete") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(CompleteUploadRequestDto(conversationId, attachmentId))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Complete upload failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun uploadToPresignedUrl(
+        uploadUrl: String,
+        bytes: ByteArray,
+        contentType: String
+    ): Result<Unit> {
+        return try {
+            val response = client.put(uploadUrl) {
+                contentType(ContentType.parse(contentType))
+                setBody(bytes)
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Upload failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getMediaUrl(
+        token: String,
+        conversationId: String,
+        messageId: String,
+        attachmentId: String
+    ): Result<MediaUrlResponseDto> {
+        return try {
+            val response = client.get("$serverUrl/api/media/$conversationId/$messageId/$attachmentId/url") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(Exception("Get media url failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun downloadMediaBytes(url: String): Result<ByteArray> {
+        return try {
+            val bytes = client.get(url).body<ByteArray>()
+            Result.success(bytes)
         } catch (e: Exception) {
             Result.failure(e)
         }

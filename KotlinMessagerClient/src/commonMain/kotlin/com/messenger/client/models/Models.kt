@@ -39,7 +39,8 @@ data class MessageDto(
     val content: String = "",
     val sentAt: String = "",
     val isDeleted: Boolean = false,
-    val replyToMessageId: String? = null
+    val replyToMessageId: String? = null,
+    val attachments: List<MessageAttachmentDto> = emptyList()
 )
 
 @Serializable
@@ -81,7 +82,53 @@ data class CreateGroupChatDto(
 data class SendMessageDto(
     val conversationId: String = "",
     val content: String = "",
-    val replyToMessageId: String? = null
+    val replyToMessageId: String? = null,
+    val attachmentIds: List<String> = emptyList()
+)
+
+@Serializable
+data class MediaEncryptionMetadataDto(
+    val algorithm: String? = null,
+    val keyId: String? = null,
+    val iv: String? = null
+)
+
+@Serializable
+data class MessageAttachmentDto(
+    val id: String = "",
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0,
+    val status: String = "",
+    val createdAt: String = "",
+    val encryption: MediaEncryptionMetadataDto? = null
+)
+
+@Serializable
+data class InitUploadRequestDto(
+    val conversationId: String = "",
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0
+)
+
+@Serializable
+data class InitUploadResponseDto(
+    val attachmentId: String = "",
+    val uploadUrl: String = "",
+    val expiresAt: String = ""
+)
+
+@Serializable
+data class CompleteUploadRequestDto(
+    val conversationId: String = "",
+    val attachmentId: String = ""
+)
+
+@Serializable
+data class MediaUrlResponseDto(
+    val url: String = "",
+    val expiresAt: String = ""
 )
 
 @Serializable
