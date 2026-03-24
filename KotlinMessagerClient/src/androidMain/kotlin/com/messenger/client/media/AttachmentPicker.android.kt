@@ -1354,6 +1354,63 @@ private fun ImageEditorDialog(
                         dstSize = IntSize(drawW.roundToInt(), drawH.roundToInt())
                     )
 
+                    fun drawShape(shape: Shape) {
+                        val stroke = Stroke(width = shapeStroke(shape) * scale)
+                        when (shape) {
+                            is Shape.PathShape -> {
+                                val path = Path()
+                                shape.points.firstOrNull()?.let { first ->
+                                    path.moveTo(mapToScreen(first).x, mapToScreen(first).y)
+                                    shape.points.drop(1).forEach { p ->
+                                        val sp = mapToScreen(p)
+                                        path.lineTo(sp.x, sp.y)
+                                    }
+                                    drawPath(path, shape.color, style = stroke)
+                                }
+                            }
+                            is Shape.LineShape -> drawLine(
+                                color = shape.color,
+                                start = mapToScreen(shape.start),
+                                end = mapToScreen(shape.end),
+                                strokeWidth = shape.stroke * scale
+                            )
+                            is Shape.RectShape -> {
+                                val rect = rectFrom(shape.start, shape.end)
+                                drawRect(
+                                    color = shape.color,
+                                    topLeft = mapToScreen(Offset(rect.left, rect.top)),
+                                    size = Size(rect.width * scale, rect.height * scale),
+                                    style = stroke
+                                )
+                            }
+                            is Shape.CircleShape -> {
+                                val radius = (shape.end - shape.start).getDistance()
+                                val center = shape.start
+                                drawCircle(
+                                    color = shape.color,
+                                    radius = radius * scale,
+                                    center = mapToScreen(center),
+                                    style = stroke
+                                )
+                            }
+                            is Shape.TriangleShape -> {
+                                val halfWidth = kotlin.math.abs(shape.end.x - shape.start.x)
+                                val baseY = shape.end.y
+                                val path = Path()
+                                val top = shape.start
+                                val left = Offset(shape.start.x - halfWidth, baseY)
+                                val right = Offset(shape.start.x + halfWidth, baseY)
+                                path.moveTo(mapToScreen(top).x, mapToScreen(top).y)
+                                path.lineTo(mapToScreen(left).x, mapToScreen(left).y)
+                                path.lineTo(mapToScreen(right).x, mapToScreen(right).y)
+                                path.close()
+                                drawPath(path, shape.color, style = stroke)
+                            }
+                        }
+                    }
+
+                    shapes.forEach { drawShape(it) }
+
                     if (tool is EditTool.Crop) {
                         val rect = cropRect
                         val topLeft = mapToScreen(Offset(rect.left, rect.top))
@@ -1402,63 +1459,6 @@ private fun ImageEditorDialog(
                             )
                         }
                     } else {
-                        fun drawShape(shape: Shape) {
-                            val stroke = Stroke(width = shapeStroke(shape) * scale)
-                            when (shape) {
-                                is Shape.PathShape -> {
-                                    val path = Path()
-                                    shape.points.firstOrNull()?.let { first ->
-                                        path.moveTo(mapToScreen(first).x, mapToScreen(first).y)
-                                        shape.points.drop(1).forEach { p ->
-                                            val sp = mapToScreen(p)
-                                            path.lineTo(sp.x, sp.y)
-                                        }
-                                        drawPath(path, shape.color, style = stroke)
-                                    }
-                                }
-                                is Shape.LineShape -> drawLine(
-                                    color = shape.color,
-                                    start = mapToScreen(shape.start),
-                                    end = mapToScreen(shape.end),
-                                    strokeWidth = shape.stroke * scale
-                                )
-                                is Shape.RectShape -> {
-                                    val rect = rectFrom(shape.start, shape.end)
-                                    drawRect(
-                                        color = shape.color,
-                                        topLeft = mapToScreen(Offset(rect.left, rect.top)),
-                                        size = Size(rect.width * scale, rect.height * scale),
-                                        style = stroke
-                                    )
-                                }
-                                is Shape.CircleShape -> {
-                                    val radius = (shape.end - shape.start).getDistance()
-                                    val center = shape.start
-                                    drawCircle(
-                                        color = shape.color,
-                                        radius = radius * scale,
-                                        center = mapToScreen(center),
-                                        style = stroke
-                                    )
-                                }
-                                is Shape.TriangleShape -> {
-                                    val halfWidth = kotlin.math.abs(shape.end.x - shape.start.x)
-                                    val baseY = shape.end.y
-                                    val path = Path()
-                                    val top = shape.start
-                                    val left = Offset(shape.start.x - halfWidth, baseY)
-                                    val right = Offset(shape.start.x + halfWidth, baseY)
-                                    path.moveTo(mapToScreen(top).x, mapToScreen(top).y)
-                                    path.lineTo(mapToScreen(left).x, mapToScreen(left).y)
-                                    path.lineTo(mapToScreen(right).x, mapToScreen(right).y)
-                                    path.close()
-                                    drawPath(path, shape.color, style = stroke)
-                                }
-                            }
-                        }
-
-                        shapes.forEach { drawShape(it) }
-
                         if (currentPath.isNotEmpty()) {
                             drawShape(Shape.PathShape(currentPath, color, strokeWidth))
                         }
