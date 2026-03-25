@@ -93,7 +93,7 @@ class StreamTransferController(
             if (fileSize <= 0) {
                 emitError(streamChatId, "Файл пустой или недоступен")
                 file.source.close()
-                return
+                return@launch
             }
             val totalChunks = ((fileSize + streamChunkSize - 1) / streamChunkSize).toInt()
             val request = StreamTransferInitRequestDto(
@@ -113,7 +113,7 @@ class StreamTransferController(
             if (response == null || response.transferId.isBlank()) {
                 emitError(streamChatId, "Не удалось начать передачу")
                 file.source.close()
-                return
+                return@launch
             }
             senderContext = StreamSenderContext(
                 transferId = response.transferId,
@@ -492,6 +492,7 @@ class StreamTransferController(
                 }
                 receiverContext = null
             }
+        }
     }
 
     private suspend fun handleStreamEvent(event: StreamTransferEvent) {
@@ -716,6 +717,7 @@ class StreamTransferController(
                     webSocketService.ackStreamChunks(ctx.transferId, ackSeqs)
                 }
             }
+        }
     }
 
     private fun tuneAckStrategy(context: StreamReceiverContext) {
@@ -753,6 +755,7 @@ class StreamTransferController(
         }
         if (newWindow < oldWindow) {
             println("[STREAM][CC] id=${context.transferId} congestion=$reason window=$oldWindow->$newWindow")
+        }
     }
 
     private fun tryIncreaseWindowLocked(context: StreamSenderContext, now: Long) {
