@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
@@ -44,6 +45,8 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -71,16 +74,28 @@ fun ChatMenuScreen(
     var unreadCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var typingByConversation by remember { mutableStateOf<Map<String, Map<String, String>>>(emptyMap()) }
     var lastMessagePreviews by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var hiddenStreamConversationIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showCreatePersonalDialog by remember { mutableStateOf(false) }
     var showCreateGroupDialog by remember { mutableStateOf(false) }
+    var showCreateStreamInviteDialog by remember { mutableStateOf(false) }
+    var showAcceptStreamInviteDialog by remember { mutableStateOf(false) }
     var showCreateMenu by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
+    var streamInviteToken by remember { mutableStateOf<String?>(null) }
+    var streamInviteExpiresAt by remember { mutableStateOf<String?>(null) }
+    var streamInviteError by remember { mutableStateOf<String?>(null) }
+    var isStreamInviteLoading by remember { mutableStateOf(false) }
+    var acceptInviteError by remember { mutableStateOf<String?>(null) }
+    var isAcceptInviteLoading by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
     val token by authState.jwtToken.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
     val currentUserEmail by authState.currentUserEmail.collectAsState()
+    val personalChats = remember(conversations) {
+        conversations.filter { it.type == "personal" }
+    }
 
     fun parseInstantOrNull(value: String?): Instant? {
         if (value.isNullOrBlank()) return null
@@ -178,11 +193,16 @@ fun ChatMenuScreen(
             result.fold(
                 onSuccess = { convs ->
                     val sorted = sortConversations(convs)
-                    conversations = sorted
-                    refreshUnreadCounts(sorted)
-                    fetchMissingPreviews(sorted)
+                    hiddenStreamConversationIds = sorted
+                        .filter { it.type == "stream" }
+                        .map { it.id }
+                        .toSet()
+                    val visibleConversations = sorted.filter { it.type != "stream" }
+                    conversations = visibleConversations
+                    refreshUnreadCounts(visibleConversations)
+                    fetchMissingPreviews(visibleConversations)
                     if (webSocketService.isConnected) {
-                        sorted.forEach { webSocketService.joinConversation(it.id) }
+                        visibleConversations.forEach { webSocketService.joinConversation(it.id) }
                     }
                     isLoading = false
                 },
@@ -202,6 +222,9 @@ fun ChatMenuScreen(
         webSocketService.newMessages.collect { event ->
             val message = event.message
             val conversationId = message.conversationId
+            if (hiddenStreamConversationIds.contains(conversationId)) {
+                return@collect
+            }
             val currentId = authState.getUserId()
             val previewOverride = buildMessagePreview(message)
 
@@ -242,6 +265,7 @@ fun ChatMenuScreen(
         webSocketService.typing.collect { event ->
             val conversationId = event.conversationId
             if (conversationId.isBlank()) return@collect
+            if (hiddenStreamConversationIds.contains(conversationId)) return@collect
             val currentId = authState.getUserId()
             if (!currentId.isNullOrBlank() && event.userId == currentId) return@collect
 
@@ -471,6 +495,111 @@ fun ChatMenuScreen(
             }
         )
     }
+
+    if (showCreateStreamInviteDialog) {
+        CreateStreamInviteDialog(
+            personalChats = personalChats,
+            currentUserId = currentUserId,
+            currentUserEmail = currentUserEmail,
+            inviteToken = streamInviteToken,
+            inviteExpiresAt = streamInviteExpiresAt,
+            isLoading = isStreamInviteLoading,
+            errorMessage = streamInviteError,
+            onDismiss = {
+                showCreateStreamInviteDialog = false
+                streamInviteError = null
+            },
+            onCreate = { personalChatId, streamName ->
+                scope.launch {
+                    val currentToken = token
+                    if (currentToken.isNullOrBlank()) {
+                        streamInviteError = "Нет авторизации"
+                        return@launch
+                    }
+                    isStreamInviteLoading = true
+                    streamInviteError = null
+                    val result = apiService.createStreamInvite(
+                        currentToken,
+                        personalChatId,
+                        streamName?.ifBlank { null }
+                    )
+                    result.fold(
+                        onSuccess = { response ->
+                            val tokenValue = response.token
+                            streamInviteToken = tokenValue
+                            streamInviteExpiresAt = response.expiresAt
+                            streamInviteError = if (tokenValue.isBlank()) {
+                                "Сервер не вернул токен инвайта"
+                            } else {
+                                null
+                            }
+                            if (tokenValue.isNotBlank()) {
+                                val inviteText = buildString {
+                                    append("Stream-инвайт: ")
+                                    append(tokenValue)
+                                    if (!response.expiresAt.isNullOrBlank()) {
+                                        append("\nДействует до: ")
+                                        append(response.expiresAt)
+                                    }
+                                }
+                                val sendResult = apiService.sendMessage(
+                                    currentToken,
+                                    personalChatId,
+                                    inviteText,
+                                    null,
+                                    emptyList()
+                                )
+                                if (sendResult.isFailure) {
+                                    streamInviteError = "Инвайт создан, но не удалось отправить токен в чат"
+                                } else {
+                                    loadConversations()
+                                }
+                            }
+                            isStreamInviteLoading = false
+                        },
+                        onFailure = { error ->
+                            streamInviteError = error.message ?: "Не удалось создать инвайт"
+                            isStreamInviteLoading = false
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    if (showAcceptStreamInviteDialog) {
+        AcceptStreamInviteDialog(
+            isLoading = isAcceptInviteLoading,
+            errorMessage = acceptInviteError,
+            onDismiss = {
+                showAcceptStreamInviteDialog = false
+                acceptInviteError = null
+            },
+            onAccept = { inviteToken ->
+                scope.launch {
+                    val currentToken = token
+                    if (currentToken.isNullOrBlank()) {
+                        acceptInviteError = "Нет авторизации"
+                        return@launch
+                    }
+                    isAcceptInviteLoading = true
+                    acceptInviteError = null
+                    val result = apiService.acceptStreamInvite(currentToken, inviteToken)
+                    result.fold(
+                        onSuccess = {
+                            showAcceptStreamInviteDialog = false
+                            isAcceptInviteLoading = false
+                            loadConversations()
+                        },
+                        onFailure = { error ->
+                            acceptInviteError = error.message ?: "Не удалось принять инвайт"
+                            isAcceptInviteLoading = false
+                        }
+                    )
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -514,13 +643,15 @@ private fun ConversationCard(
     }
 
     val personalTitle = remember(conversation, currentUserId, currentUserEmail) {
-        if (conversation.type != "personal") {
-            conversation.name
-        } else {
-            val otherUser = conversation.members.firstOrNull { it.userId != currentUserId }?.user
-            val byDisplayName = otherUser?.displayName?.ifBlank { null }
-            val byEmail = otherUser?.email?.ifBlank { null }
-            byDisplayName ?: byEmail ?: conversation.name
+        when (conversation.type) {
+            "personal" -> {
+                val otherUser = conversation.members.firstOrNull { it.userId != currentUserId }?.user
+                val byDisplayName = otherUser?.displayName?.ifBlank { null }
+                val byEmail = otherUser?.email?.ifBlank { null }
+                byDisplayName ?: byEmail ?: conversation.name
+            }
+            "stream" -> conversation.name ?: "Stream чат"
+            else -> conversation.name
         }
     }
 
@@ -685,4 +816,35 @@ private fun CreateGroupChatDialog(
             }
         }
     )
+}
+
+@Composable
+private fun CreateStreamInviteDialog(
+    personalChats: List<ConversationDto>,
+    currentUserId: String?,
+    currentUserEmail: String?,
+    inviteToken: String?,
+    inviteExpiresAt: String?,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onCreate: (String, String?) -> Unit
+) {
+}
+
+@Composable
+private fun AcceptStreamInviteDialog(
+    isLoading: Boolean,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onAccept: (String) -> Unit
+) {
+}
+
+private fun resolvePersonalChatTitle(
+    conversation: ConversationDto,
+    currentUserId: String?,
+    currentUserEmail: String?
+): String {
+    return conversation.name ?: "Чат"
 }

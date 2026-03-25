@@ -1,12 +1,31 @@
 package com.messenger.client.services
 
+import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import com.google.gson.JsonElement
 import com.messenger.client.models.MessageReadEventDto
 import com.messenger.client.models.NewMessageEventDto
+import com.messenger.client.models.StreamTransferAcceptedDto
+import com.messenger.client.models.StreamTransferAckDto
+import com.messenger.client.models.StreamTransferCanceledDto
+import com.messenger.client.models.StreamTransferChunkDto
+import com.messenger.client.models.StreamTransferCompleteRequestDto
+import com.messenger.client.models.StreamTransferCompletedDto
+import com.messenger.client.models.StreamTransferEvent
+import com.messenger.client.models.StreamTransferInitRequestDto
+import com.messenger.client.models.StreamTransferNackDto
+import com.messenger.client.models.StreamTransferOfferDto
+import com.messenger.client.models.StreamTransferRejectRequestDto
+import com.messenger.client.models.StreamTransferRejectedDto
+import com.messenger.client.models.StreamTransferResumeRequestDto
+import com.messenger.client.models.StreamTransferStartResponseDto
+import com.messenger.client.models.StreamTransferAcceptRequestDto
+import com.messenger.client.models.StreamTransferCancelRequestDto
 import com.messenger.client.models.TypingEventDto
 import com.microsoft.signalr.HubConnection
 import com.microsoft.signalr.HubConnectionBuilder
+import com.microsoft.signalr.HubConnectionState
 import io.reactivex.rxjava3.core.Single
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -16,6 +35,9 @@ actual class MessengerWebSocketService actual constructor(
     private val serverUrl: String
 ) {
     private val gson = Gson()
+    private val gsonUpper = GsonBuilder()
+        .setFieldNamingPolicy(FieldNamingPolicy.UPPER_CAMEL_CASE)
+        .create()
     private var connection: HubConnection? = null
     private var _isConnected: Boolean = false
 
@@ -28,18 +50,42 @@ actual class MessengerWebSocketService actual constructor(
     private val _typing = MutableSharedFlow<TypingEventDto>(extraBufferCapacity = 64)
     actual val typing: SharedFlow<TypingEventDto> = _typing
 
+    private val _streamEvents = MutableSharedFlow<StreamTransferEvent>(extraBufferCapacity = 256)
+    actual val streamEvents: SharedFlow<StreamTransferEvent> = _streamEvents
+
     actual val isConnected: Boolean
-        get() = _isConnected
+        get() = connection?.connectionState == HubConnectionState.CONNECTED
 
     actual fun connect(jwtToken: String): Boolean {
         return try {
-            disconnect()
+            val existing = connection
+            if (existing != null) {
+                when (existing.connectionState) {
+                    HubConnectionState.CONNECTED -> {
+                        _isConnected = true
+                        return true
+                    }
+                    HubConnectionState.CONNECTING -> {
+                        return false
+                    }
+                    HubConnectionState.DISCONNECTED -> {
+                        disconnect()
+                    }
+                }
+            }
 
             val hub = HubConnectionBuilder.create("$serverUrl/messengerHub")
                 .withAccessTokenProvider(Single.just(jwtToken))
                 .build()
 
             registerHandlers(hub)
+            hub.onClosed { error ->
+                _isConnected = false
+                if (connection === hub) {
+                    connection = null
+                }
+                println("[WS] Hub closed: ${error?.message ?: "normal"}")
+            }
 
             hub.start().blockingAwait()
             connection = hub
@@ -89,6 +135,56 @@ actual class MessengerWebSocketService actual constructor(
         if (!_isConnected) return
         val uuid = toUuid(conversationId) ?: return
         connection?.send("SendMessage", uuid, content, replyToMessageId)
+    }
+
+    actual fun startStreamTransfer(request: StreamTransferInitRequestDto): StreamTransferStartResponseDto? {
+        if (!_isConnected) return null
+        return try {
+            connection?.invoke(StreamTransferStartResponseDto::class.java, "StartStreamTransfer", request)
+                ?.blockingGet()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    actual fun acceptStreamTransfer(transferId: String) {
+        if (!_isConnected) return
+        connection?.send("AcceptStreamTransfer", StreamTransferAcceptRequestDto(transferId))
+    }
+
+    actual fun rejectStreamTransfer(transferId: String, reason: String?) {
+        if (!_isConnected) return
+        connection?.send("RejectStreamTransfer", StreamTransferRejectRequestDto(transferId, reason))
+    }
+
+    actual fun sendStreamChunk(chunk: StreamTransferChunkDto) {
+        if (!_isConnected) return
+        connection?.send("SendStreamChunk", chunk)
+    }
+
+    actual fun ackStreamChunks(transferId: String, seqs: List<Int>) {
+        if (!_isConnected) return
+        connection?.send("AckStreamChunks", StreamTransferAckDto(transferId, seqs))
+    }
+
+    actual fun nackStreamChunks(transferId: String, seqs: List<Int>) {
+        if (!_isConnected) return
+        connection?.send("NackStreamChunks", StreamTransferNackDto(transferId, seqs))
+    }
+
+    actual fun requestStreamTransferResume(transferId: String, missingSeqs: List<Int>) {
+        if (!_isConnected) return
+        connection?.send("RequestStreamTransferResume", StreamTransferResumeRequestDto(transferId, missingSeqs))
+    }
+
+    actual fun completeStreamTransfer(transferId: String) {
+        if (!_isConnected) return
+        connection?.send("CompleteStreamTransfer", StreamTransferCompleteRequestDto(transferId))
+    }
+
+    actual fun cancelStreamTransfer(transferId: String, reason: String?) {
+        if (!_isConnected) return
+        connection?.send("CancelStreamTransfer", StreamTransferCancelRequestDto(transferId, reason))
     }
 
     private fun registerHandlers(hub: HubConnection) {
@@ -182,7 +278,54 @@ actual class MessengerWebSocketService actual constructor(
                     )
                 }
             }
+            "stream_transfer_offer" -> {
+                val dto = parseStreamDto(eventData, StreamTransferOfferDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Offer(dto))
+            }
+            "stream_transfer_accepted" -> {
+                val dto = parseStreamDto(eventData, StreamTransferAcceptedDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Accepted(dto))
+            }
+            "stream_transfer_rejected" -> {
+                val dto = parseStreamDto(eventData, StreamTransferRejectedDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Rejected(dto))
+            }
+            "stream_transfer_chunk" -> {
+                val dto = parseStreamDto(eventData, StreamTransferChunkDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Chunk(dto))
+            }
+            "stream_transfer_ack" -> {
+                val dto = parseStreamDto(eventData, StreamTransferAckDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Ack(dto))
+            }
+            "stream_transfer_nack" -> {
+                val dto = parseStreamDto(eventData, StreamTransferNackDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Nack(dto))
+            }
+            "stream_transfer_resume" -> {
+                val dto = parseStreamDto(eventData, StreamTransferResumeRequestDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Resume(dto))
+            }
+            "stream_transfer_complete" -> {
+                val dto = parseStreamDto(eventData, StreamTransferCompletedDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Complete(dto))
+            }
+            "stream_transfer_canceled" -> {
+                val dto = parseStreamDto(eventData, StreamTransferCanceledDto::class.java) { it.transferId }
+                if (dto != null) _streamEvents.tryEmit(StreamTransferEvent.Canceled(dto))
+            }
         }
+    }
+
+    private fun <T> parseStreamDto(
+        eventData: JsonElement,
+        clazz: Class<T>,
+        idProvider: (T) -> String
+    ): T? {
+        val primary = runCatching { gson.fromJson(eventData, clazz) }.getOrNull()
+        if (primary != null && idProvider(primary).isNotBlank()) return primary
+        val fallback = runCatching { gsonUpper.fromJson(eventData, clazz) }.getOrNull()
+        return if (fallback != null && idProvider(fallback).isNotBlank()) fallback else primary ?: fallback
     }
 
     private fun handleReceiveEvent(eventData: JsonElement) {

@@ -123,6 +123,75 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         }
     }
 
+    suspend fun createStreamInvite(
+        token: String,
+        personalChatId: String,
+        streamChatName: String? = null
+    ): Result<CreateStreamInviteResponseDto> {
+        return try {
+            val response = client.post("$serverUrl/api/stream-invites") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(CreateStreamInviteRequestDto(personalChatId, streamChatName))
+            }
+            if (response.status.isSuccess()) {
+                val dto = response.body<CreateStreamInviteResponseDto>()
+                val resolvedToken = dto.token.ifBlank { dto.tokenPascal.orEmpty() }
+                val resolvedExpires = dto.expiresAt.ifBlank { dto.expiresAtPascal.orEmpty() }
+                val resolved = if (resolvedToken == dto.token && resolvedExpires == dto.expiresAt) {
+                    dto
+                } else {
+                    dto.copy(token = resolvedToken, expiresAt = resolvedExpires)
+                }
+                Result.success(resolved)
+            } else {
+                Result.failure(Exception("Create stream invite failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun acceptStreamInvite(
+        token: String,
+        inviteToken: String
+    ): Result<AcceptStreamInviteResponseDto> {
+        return try {
+            val response = client.post("$serverUrl/api/stream-invites/accept") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(AcceptStreamInviteRequestDto(inviteToken))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(Exception("Accept stream invite failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun revokeStreamInvite(
+        token: String,
+        inviteId: String
+    ): Result<Unit> {
+        return try {
+            val response = client.post("$serverUrl/api/stream-invites/revoke") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(RevokeStreamInviteRequestDto(inviteId))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Revoke stream invite failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun getAllConversations(token: String): Result<List<ConversationDto>> {
         return try {
             val response = client.get("$serverUrl/api/chat") {

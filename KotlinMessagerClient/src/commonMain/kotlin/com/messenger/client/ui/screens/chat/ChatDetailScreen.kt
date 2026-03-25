@@ -77,10 +77,9 @@ import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
 import com.messenger.client.ui.components.TypingIndicatorText
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -90,6 +89,7 @@ fun ChatDetailScreen(
     authState: AuthState,
     conversation: ConversationDto,
     webSocketService: MessengerWebSocketService,
+    onOpenTransferChannel: (ConversationDto) -> Unit = {},
     onBack: () -> Unit
 ) {
     var conversationState by remember { mutableStateOf(conversation) }
@@ -110,6 +110,8 @@ fun ChatDetailScreen(
     var addMemberIdentifier by remember { mutableStateOf("") }
     var isTyping by remember { mutableStateOf(false) }
     var pendingReadMessageId by remember { mutableStateOf<String?>(null) }
+    var isCreatingTransferInvite by remember { mutableStateOf(false) }
+    var isAcceptingTransferInvite by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
@@ -135,7 +137,6 @@ fun ChatDetailScreen(
         focusedLabelColor = chatAccent,
         cursorColor = chatAccent
     )
-
     fun parseInstantOrNull(value: String): Instant? {
         if (value.isBlank()) return null
         return runCatching { Instant.parse(value) }.getOrNull()
@@ -259,6 +260,130 @@ fun ChatDetailScreen(
         }
     }
 
+    fun inviteToTransferChannel() {
+        if (conversationState.type != "personal") return
+        if (isCreatingTransferInvite) return
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                errorMessage = "Нет авторизации"
+                return@launch
+            }
+            isCreatingTransferInvite = true
+            val createResult = apiService.createStreamInvite(
+                token = currentToken,
+                personalChatId = conversationState.id,
+                streamChatName = "Канал передачи"
+            )
+            createResult.fold(
+                onSuccess = { response ->
+                    val inviteToken = response.token.ifBlank { response.tokenPascal.orEmpty() }
+                    if (inviteToken.isBlank()) {
+                        errorMessage = "Сервер не вернул токен приглашения"
+                    } else {
+                        val inviteMessage = buildString {
+                            append("Приглашение в канал передачи файлов.")
+                            if (!response.expiresAt.isNullOrBlank()) {
+                                append("\nДействует до: ")
+                                append(response.expiresAt)
+                            }
+                            if (!response.streamChatId.isNullOrBlank()) {
+                                append("\nTRANSFER_CHANNEL_ID:")
+                                append(response.streamChatId)
+                            }
+                            append("\nTRANSFER_CHANNEL_INVITE_TOKEN:")
+                            append(inviteToken)
+                        }
+                        val sendResult = apiService.sendMessage(
+                            token = currentToken,
+                            conversationId = conversationState.id,
+                            content = inviteMessage,
+                            replyToMessageId = null,
+                            attachmentIds = emptyList()
+                        )
+                        sendResult.fold(
+                            onSuccess = { message ->
+                                messages = normalizeMessages(messages + message)
+                            },
+                            onFailure = { error ->
+                                errorMessage = error.message ?: "Инвайт создан, но не удалось отправить сообщение"
+                            }
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    errorMessage = error.message ?: "Не удалось создать инвайт в канал передачи"
+                }
+            )
+            isCreatingTransferInvite = false
+        }
+    }
+
+    suspend fun findExistingTransferChannel(currentToken: String): ConversationDto? {
+        val conversationsResult = apiService.getAllConversations(currentToken)
+        val allConversations = conversationsResult.getOrNull() ?: return null
+        val personalMemberIds = conversationState.members.map { it.userId }.toSet()
+        val matching = allConversations
+            .asSequence()
+            .filter { it.type == "stream" }
+            .filter { streamConversation ->
+                if (personalMemberIds.isEmpty()) return@filter true
+                val streamMemberIds = streamConversation.members.map { it.userId }.toSet()
+                personalMemberIds.all { streamMemberIds.contains(it) }
+            }
+            .toList()
+        return matching.maxByOrNull { streamConversation ->
+            parseInstantOrNull(streamConversation.lastMessageAt ?: streamConversation.createdAt)
+                ?: Instant.DISTANT_PAST
+        }
+    }
+
+    fun openTransferChannelFromInvite(inviteToken: String, transferChannelIdHint: String? = null) {
+        if (isAcceptingTransferInvite) return
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                errorMessage = "Нет авторизации"
+                return@launch
+            }
+            isAcceptingTransferInvite = true
+            if (!transferChannelIdHint.isNullOrBlank()) {
+                val hintedConversation = apiService.getConversation(currentToken, transferChannelIdHint).getOrNull()
+                if (hintedConversation != null) {
+                    onOpenTransferChannel(hintedConversation)
+                    isAcceptingTransferInvite = false
+                    return@launch
+                }
+            }
+
+            val acceptResult = if (inviteToken.isNotBlank()) {
+                apiService.acceptStreamInvite(currentToken, inviteToken)
+            } else {
+                Result.failure(Exception("Пустой токен приглашения"))
+            }
+            val acceptedChannelId = acceptResult.getOrNull()?.streamChatId?.ifBlank { null }
+            if (acceptedChannelId != null) {
+                val acceptedConversation = apiService.getConversation(currentToken, acceptedChannelId).getOrNull()
+                if (acceptedConversation != null) {
+                    onOpenTransferChannel(acceptedConversation)
+                    isAcceptingTransferInvite = false
+                    return@launch
+                }
+            }
+
+            val existingConversation = findExistingTransferChannel(currentToken)
+            if (existingConversation != null) {
+                onOpenTransferChannel(existingConversation)
+                isAcceptingTransferInvite = false
+                return@launch
+            }
+
+            errorMessage = acceptResult.exceptionOrNull()?.message
+                ?: "Не удалось открыть канал передачи по приглашению"
+            isAcceptingTransferInvite = false
+        }
+    }
+
     fun addMember(identifier: String) {
         scope.launch {
             val currentToken = token
@@ -303,13 +428,11 @@ fun ChatDetailScreen(
 
     LaunchedEffect(conversationState.id, token) {
         val currentToken = token
-        if (!currentToken.isNullOrBlank()) {
-            if (!webSocketService.isConnected) {
-                withContext(Dispatchers.IO) {
-                    webSocketService.connect(currentToken)
-                }
-            }
-            if (webSocketService.isConnected) {
+        if (currentToken.isNullOrBlank()) return@LaunchedEffect
+        var wasConnected = false
+        while (isActive) {
+            val connected = webSocketService.isConnected
+            if (connected && !wasConnected) {
                 webSocketService.joinConversation(conversationState.id)
                 pendingReadMessageId?.let { pendingId ->
                     if (pendingId.isNotBlank()) {
@@ -326,6 +449,8 @@ fun ChatDetailScreen(
                     )
                 }
             }
+            wasConnected = connected
+            delay(3_000)
         }
     }
 
@@ -547,15 +672,16 @@ fun ChatDetailScreen(
                 }
 
                 Column {
-                    val headerTitle = if (conversationState.type == "personal") {
-                        val otherUser = conversationState.members
-                            .firstOrNull { it.userId != authState.getUserId() }
-                            ?.user
-                        otherUser?.displayName?.ifBlank { null }
-                            ?: otherUser?.email?.ifBlank { null }
-                            ?: "Чат"
-                    } else {
-                        conversationState.name ?: "Чат"
+                    val headerTitle = when (conversationState.type) {
+                        "personal" -> {
+                            val otherUser = conversationState.members
+                                .firstOrNull { it.userId != authState.getUserId() }
+                                ?.user
+                            otherUser?.displayName?.ifBlank { null }
+                                ?: otherUser?.email?.ifBlank { null }
+                                ?: "Чат"
+                        }
+                        else -> conversationState.name ?: "Чат"
                     }
                     Text(
                         text = headerTitle,
@@ -598,12 +724,25 @@ fun ChatDetailScreen(
                 }
             }
 
-            if (conversationState.type == "group") {
-                IconButton(onClick = { showAddMemberDialog = true }) {
-                    Icon(
-                        Icons.Filled.PersonAdd,
-                        contentDescription = "Добавить участника"
-                    )
+            when (conversationState.type) {
+                "group" -> {
+                    IconButton(onClick = { showAddMemberDialog = true }) {
+                        Icon(
+                            Icons.Filled.PersonAdd,
+                            contentDescription = "Добавить участника"
+                        )
+                    }
+                }
+                "personal" -> {
+                    IconButton(
+                        onClick = { inviteToTransferChannel() },
+                        enabled = !isCreatingTransferInvite
+                    ) {
+                        Icon(
+                            Icons.Filled.OpenInNew,
+                            contentDescription = "Пригласить в канал передачи"
+                        )
+                    }
                 }
             }
         }
@@ -657,7 +796,10 @@ fun ChatDetailScreen(
                             colors = bubbleColors,
                             onReply = { replyToMessage = it },
                             apiService = apiService,
-                            token = token
+                            token = token,
+                            onOpenTransferChannelFromInvite = { inviteToken, transferChannelId ->
+                                openTransferChannelFromInvite(inviteToken, transferChannelId)
+                            }
                         )
                     }
                 }
@@ -930,6 +1072,51 @@ private fun formatFileSize(size: Long): String {
     }
 }
 
+private const val TransferInviteTokenPrefix = "TRANSFER_CHANNEL_INVITE_TOKEN:"
+private const val TransferChannelIdPrefix = "TRANSFER_CHANNEL_ID:"
+
+private fun extractTransferChannelInviteToken(content: String): String? {
+    val prefixes = listOf(
+        TransferInviteTokenPrefix,
+        "Токен канала:",
+        "Stream-инвайт:"
+    )
+    return content.lineSequence()
+        .map { it.trim() }
+        .firstNotNullOfOrNull { line ->
+            prefixes.firstNotNullOfOrNull { prefix ->
+                if (line.startsWith(prefix, ignoreCase = true)) {
+                    line.substringAfter(':').trim().ifBlank { null }
+                } else {
+                    null
+                }
+            }
+        }
+}
+
+private fun extractTransferChannelId(content: String): String? {
+    return content.lineSequence()
+        .map { it.trim() }
+        .firstNotNullOfOrNull { line ->
+            if (line.startsWith(TransferChannelIdPrefix, ignoreCase = true)) {
+                line.substringAfter(':').trim().ifBlank { null }
+            } else {
+                null
+            }
+        }
+}
+
+private fun sanitizeInviteMetaLines(content: String): String {
+    return content.lineSequence()
+        .filterNot { line ->
+            val trimmed = line.trim()
+            trimmed.startsWith(TransferInviteTokenPrefix, ignoreCase = true) ||
+                trimmed.startsWith(TransferChannelIdPrefix, ignoreCase = true)
+        }
+        .joinToString("\n")
+        .trim()
+}
+
 @Composable
 private fun MessageBubble(
     message: MessageDto,
@@ -940,7 +1127,8 @@ private fun MessageBubble(
     colors: ChatBubbleColors,
     onReply: (MessageDto) -> Unit,
     apiService: ApiService,
-    token: String?
+    token: String?,
+    onOpenTransferChannelFromInvite: ((String, String?) -> Unit)?
 ) {
     var hasTriggered by remember { mutableStateOf(false) }
     var dragTotal by remember { mutableStateOf(0f) }
@@ -1011,11 +1199,31 @@ private fun MessageBubble(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     if (message.content.isNotBlank()) {
-                        Text(
-                            text = message.content,
-                            fontSize = 14.sp,
-                            color = if (isOwn) colors.ownText else colors.otherText
-                        )
+                        val inviteToken = extractTransferChannelInviteToken(message.content)
+                        val transferChannelId = extractTransferChannelId(message.content)
+                        val normalizedContent = sanitizeInviteMetaLines(message.content)
+                        if (normalizedContent.isNotBlank()) {
+                            Text(
+                                text = normalizedContent,
+                                fontSize = 14.sp,
+                                color = if (isOwn) colors.ownText else colors.otherText
+                            )
+                        }
+                        if ((inviteToken != null || transferChannelId != null) &&
+                            onOpenTransferChannelFromInvite != null
+                        ) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            TextButton(
+                                onClick = {
+                                    onOpenTransferChannelFromInvite(
+                                        inviteToken.orEmpty(),
+                                        transferChannelId
+                                    )
+                                }
+                            ) {
+                                Text("Перейти в канал")
+                            }
+                        }
                     }
 
                     if (message.attachments.isNotEmpty()) {

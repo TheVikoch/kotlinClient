@@ -1,6 +1,8 @@
 # Gradle
 /.gradle/
+/.gradle-local/
 **/.gradle/
+**/.gradle-local/
 **/build/
 **/out/
 **/.kotlin/

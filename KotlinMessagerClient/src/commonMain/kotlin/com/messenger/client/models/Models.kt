@@ -1,5 +1,6 @@
 package com.messenger.client.models
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -37,6 +38,8 @@ data class MessageDto(
     val senderId: String = "",
     val sender: UserDto = UserDto(),
     val content: String = "",
+    val kind: String = "text",
+    val metadataJson: String? = null,
     val sentAt: String = "",
     val isDeleted: Boolean = false,
     val replyToMessageId: String? = null,
@@ -192,4 +195,185 @@ data class TypingEventDto(
     val conversationId: String = "",
     val isTyping: Boolean = false,
     val userName: String = ""
+)
+
+@Serializable
+data class CreateStreamInviteRequestDto(
+    val personalChatId: String = "",
+    val streamChatName: String? = null
+)
+
+@Serializable
+data class CreateStreamInviteResponseDto(
+    val inviteId: String = "",
+    val personalChatId: String = "",
+    val creatorId: String = "",
+    val targetUserId: String = "",
+    val streamChatId: String? = null,
+    val token: String = "",
+    @SerialName("Token") val tokenPascal: String? = null,
+    val streamChatName: String? = null,
+    val expiresAt: String = "",
+    @SerialName("ExpiresAt") val expiresAtPascal: String? = null
+)
+
+@Serializable
+data class AcceptStreamInviteRequestDto(
+    val token: String = ""
+)
+
+@Serializable
+data class AcceptStreamInviteResponseDto(
+    val inviteId: String = "",
+    val personalChatId: String = "",
+    val creatorId: String = "",
+    val targetUserId: String = "",
+    val streamChatId: String = "",
+    val streamChatName: String? = null,
+    val acceptedAt: String = "",
+    val expiresAt: String = ""
+)
+
+@Serializable
+data class RevokeStreamInviteRequestDto(
+    val inviteId: String = ""
+)
+
+@Serializable
+data class StreamInviteMetadataDto(
+    val inviteId: String = "",
+    val personalChatId: String = "",
+    val creatorId: String = "",
+    val targetUserId: String = "",
+    val streamChatId: String? = null,
+    val status: String = "",
+    val expiresAt: String = "",
+    val acceptedAt: String? = null,
+    val revokedAt: String? = null
+)
+
+@Serializable
+data class StreamTransferInitRequestDto(
+    val streamChatId: String = "",
+    val fileName: String = "",
+    val fileSize: Long = 0,
+    val fileHash: String = "",
+    val fileHashAlgorithm: String = "SHA-256",
+    val chunkHashAlgorithm: String = "CRC32",
+    val chunkSize: Int = 0,
+    val totalChunks: Int = 0,
+    val contentType: String? = null,
+    val caption: String? = null
+)
+
+@Serializable
+data class StreamTransferStartResponseDto(
+    val transferId: String = "",
+    val streamChatId: String = "",
+    val receiverId: String = "",
+    val expiresAt: String = ""
+)
+
+@Serializable
+data class StreamTransferOfferDto(
+    val transferId: String = "",
+    val streamChatId: String = "",
+    val senderId: String = "",
+    val fileName: String = "",
+    val fileSize: Long = 0,
+    val fileHash: String = "",
+    val fileHashAlgorithm: String = "SHA-256",
+    val chunkHashAlgorithm: String = "CRC32",
+    val chunkSize: Int = 0,
+    val totalChunks: Int = 0,
+    val contentType: String? = null,
+    val caption: String? = null
+)
+
+@Serializable
+data class StreamTransferAcceptRequestDto(
+    val transferId: String = ""
+)
+
+@Serializable
+data class StreamTransferRejectRequestDto(
+    val transferId: String = "",
+    val reason: String? = null
+)
+
+@Serializable
+data class StreamTransferAcceptedDto(
+    val transferId: String = "",
+    val streamChatId: String = "",
+    val receiverId: String = ""
+)
+
+@Serializable
+data class StreamTransferRejectedDto(
+    val transferId: String = "",
+    val reason: String? = null
+)
+
+@Serializable
+data class StreamTransferChunkDto(
+    val transferId: String = "",
+    val seq: Int = 0,
+    val data: String = "",
+    val chunkHash: String = "",
+    val isLast: Boolean = false
+)
+
+@Serializable
+data class StreamTransferAckDto(
+    val transferId: String = "",
+    val seqs: List<Int> = emptyList()
+)
+
+@Serializable
+data class StreamTransferNackDto(
+    val transferId: String = "",
+    val seqs: List<Int> = emptyList()
+)
+
+@Serializable
+data class StreamTransferResumeRequestDto(
+    val transferId: String = "",
+    val missingSeqs: List<Int> = emptyList()
+)
+
+@Serializable
+data class StreamTransferCompleteRequestDto(
+    val transferId: String = ""
+)
+
+@Serializable
+data class StreamTransferCancelRequestDto(
+    val transferId: String = "",
+    val reason: String? = null
+)
+
+@Serializable
+data class StreamTransferCompletedDto(
+    val transferId: String = ""
+)
+
+@Serializable
+data class StreamTransferCanceledDto(
+    val transferId: String = "",
+    val reason: String? = null
+)
+
+@Serializable
+data class StreamTransferReportDto(
+    val streamChatId: String = "",
+    val senderId: String = "",
+    val receiverId: String = "",
+    val fileName: String = "",
+    val fileSize: Long = 0,
+    val fileHash: String = "",
+    val status: String = "completed",
+    val chunkSize: Int = 0,
+    val totalChunks: Int = 0,
+    val startedAt: String = "",
+    val completedAt: String = ""
 )

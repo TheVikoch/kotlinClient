@@ -56,6 +56,7 @@ kotlin {
                 implementation("androidx.core:core-ktx:1.13.1")
                 implementation("androidx.activity:activity-compose:1.9.0")
                 implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
+                implementation("androidx.documentfile:documentfile:1.0.1")
                 implementation("io.ktor:ktor-client-okhttp:2.3.8")
                 implementation("com.microsoft.signalr:signalr:7.0.14")
                 implementation("io.reactivex.rxjava3:rxjava:3.1.8")
@@ -69,6 +70,7 @@ kotlin {
                 implementation("com.microsoft.signalr:signalr:7.0.14")
                 implementation("io.reactivex.rxjava3:rxjava:3.1.8")
                 implementation("com.google.code.gson:gson:2.10.1")
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.0")
                 val osName = System.getProperty("os.name").lowercase()
                 val javafxClassifier = when {
                     osName.contains("win") -> "win"

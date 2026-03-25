@@ -20,15 +20,20 @@ import androidx.compose.ui.text.font.FontWeight
 import com.messenger.client.models.ConversationDto
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.transfer.StreamTransferController
 import com.messenger.client.ui.screens.auth.LoginScreen
 import com.messenger.client.ui.screens.auth.RegisterScreen
 import com.messenger.client.ui.screens.chat.ChatDetailScreen
 import com.messenger.client.ui.screens.chat.ChatMenuScreen
+import com.messenger.client.ui.screens.chat.TransferChannelScreen
 import com.messenger.client.ui.screens.main.MainMenuScreen
 import com.messenger.client.ui.screens.sessions.SessionsScreen
+import com.messenger.client.media.rememberStreamTransferStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @Composable
 fun MainScreen(authState: AuthState) {
@@ -37,15 +42,29 @@ fun MainScreen(authState: AuthState) {
     var showSessions by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(true) }
     var currentConversation by remember { mutableStateOf<ConversationDto?>(null) }
+    var currentTransferChannel by remember { mutableStateOf<ConversationDto?>(null) }
     val scope = rememberCoroutineScope()
     val webSocketService = remember { MessengerWebSocketService() }
+    val streamStorage = rememberStreamTransferStorage()
+    val streamTransferController = remember(webSocketService, streamStorage) {
+        StreamTransferController(webSocketService, streamStorage)
+    }
     val token by authState.jwtToken.collectAsState()
 
-    LaunchedEffect(authState.isLoggedIn.collectAsState().value, showRegister, showSessions, showChatMenu, currentConversation) {
+    LaunchedEffect(
+        authState.isLoggedIn.collectAsState().value,
+        showRegister,
+        showSessions,
+        showChatMenu,
+        currentConversation,
+        currentTransferChannel
+    ) {
         val isLoggedIn = authState.isLoggedIn.value
         val conversation = currentConversation
+        val transferChannel = currentTransferChannel
         currentScreen = when {
             !isLoggedIn -> if (showRegister) Screen.Register else Screen.Login
+            transferChannel != null -> Screen.TransferChannel(transferChannel)
             conversation != null -> Screen.ChatDetail(conversation)
             showSessions -> Screen.Sessions
             showChatMenu -> Screen.ChatMenu
@@ -57,10 +76,23 @@ fun MainScreen(authState: AuthState) {
         val currentToken = token
         if (currentToken.isNullOrBlank()) {
             webSocketService.disconnect()
-        } else {
-            withContext(Dispatchers.IO) {
-                webSocketService.connect(currentToken)
+            streamTransferController.resetForLogout()
+            return@LaunchedEffect
+        }
+        var wasConnected = false
+        while (isActive) {
+            if (!webSocketService.isConnected) {
+                withContext(Dispatchers.IO) {
+                    webSocketService.connect(currentToken)
+                }
             }
+            val connected = webSocketService.isConnected
+            if (connected && !wasConnected) {
+                wasConnected = true
+            } else if (!connected) {
+                wasConnected = false
+            }
+            delay(3_000)
         }
     }
 
@@ -124,10 +156,13 @@ fun MainScreen(authState: AuthState) {
                         },
                         onLogout = {
                             scope.launch {
+                                streamTransferController.resetForLogout()
                                 authState.clearAuth()
                                 currentScreen = Screen.Login
                                 showSessions = false
                                 showChatMenu = false
+                                currentConversation = null
+                                currentTransferChannel = null
                             }
                         }
                     )
@@ -151,6 +186,7 @@ fun MainScreen(authState: AuthState) {
                             currentScreen = Screen.MainMenu
                         },
                         onOpenChat = { conversation ->
+                            currentTransferChannel = null
                             currentConversation = conversation
                             currentScreen = Screen.ChatDetail(conversation)
                         }
@@ -161,10 +197,33 @@ fun MainScreen(authState: AuthState) {
                         authState = authState,
                         conversation = screen.conversation,
                         webSocketService = webSocketService,
+                        onOpenTransferChannel = { transferChannel ->
+                            currentTransferChannel = transferChannel
+                            currentScreen = Screen.TransferChannel(transferChannel)
+                        },
                         onBack = {
+                            currentTransferChannel = null
                             currentConversation = null
                             showChatMenu = true
                             currentScreen = Screen.ChatMenu
+                        }
+                    )
+                }
+                is Screen.TransferChannel -> {
+                    TransferChannelScreen(
+                        authState = authState,
+                        conversation = screen.conversation,
+                        webSocketService = webSocketService,
+                        streamTransferController = streamTransferController,
+                        onBack = {
+                            currentTransferChannel = null
+                            val previousConversation = currentConversation
+                            if (previousConversation != null) {
+                                currentScreen = Screen.ChatDetail(previousConversation)
+                            } else {
+                                showChatMenu = true
+                                currentScreen = Screen.ChatMenu
+                            }
                         }
                     )
                 }
@@ -181,4 +240,5 @@ sealed class Screen {
     object Sessions : Screen()
     object ChatMenu : Screen()
     data class ChatDetail(val conversation: ConversationDto) : Screen()
+    data class TransferChannel(val conversation: ConversationDto) : Screen()
 }
