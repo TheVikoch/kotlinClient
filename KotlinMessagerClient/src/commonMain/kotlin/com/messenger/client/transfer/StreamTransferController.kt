@@ -492,7 +492,6 @@ class StreamTransferController(
                 }
                 receiverContext = null
             }
-        }
     }
 
     private suspend fun handleStreamEvent(event: StreamTransferEvent) {
