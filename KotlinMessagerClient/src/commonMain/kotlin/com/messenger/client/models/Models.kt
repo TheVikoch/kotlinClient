@@ -261,7 +261,8 @@ data class StreamTransferInitRequestDto(
     val fileHashAlgorithm: String = "SHA-256",
     val chunkHashAlgorithm: String = "CRC32",
     val chunkSize: Int = 0,
-    val laneCount: Int = 1,
+    val senderLaneCount: Int = 1,
+    val receiverLaneCount: Int = 1,
     val totalChunks: Int = 0,
     val contentType: String? = null,
     val caption: String? = null
@@ -272,7 +273,8 @@ data class StreamTransferStartResponseDto(
     val transferId: String = "",
     val streamChatId: String = "",
     val receiverId: String = "",
-    val laneCount: Int = 1,
+    val senderLaneCount: Int = 1,
+    val receiverLaneCount: Int = 1,
     val expiresAt: String = ""
 )
 
@@ -287,7 +289,8 @@ data class StreamTransferOfferDto(
     val fileHashAlgorithm: String = "SHA-256",
     val chunkHashAlgorithm: String = "CRC32",
     val chunkSize: Int = 0,
-    val laneCount: Int = 1,
+    val senderLaneCount: Int = 1,
+    val receiverLaneCount: Int = 1,
     val totalChunks: Int = 0,
     val contentType: String? = null,
     val caption: String? = null

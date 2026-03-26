@@ -33,7 +33,8 @@ class StreamTransferController(
     private val streamChunkSize: Int = 2 * 1024 * 1024,
     private val streamWindowSize: Int = 64,
     private val streamMaxBufferedBytes: Int = 32 * 1024 * 1024,
-    private val streamLaneCount: Int = 4
+    private val streamSenderLaneCount: Int = 2,
+    private val streamReceiverLaneCount: Int = 8
 ) {
     companion object {
         private const val DEFERRED_FILE_HASH = "DEFERRED"
@@ -46,7 +47,8 @@ class StreamTransferController(
         4,
         min(streamWindowSize, max(1, streamMaxBufferedBytes / streamChunkSize))
     )
-    private val effectiveStreamLaneCount = max(1, min(streamLaneCount, effectiveStreamWindowSize))
+    private val effectiveStreamSenderLaneCount = max(1, min(streamSenderLaneCount, effectiveStreamWindowSize))
+    private val effectiveStreamReceiverLaneCount = max(1, min(streamReceiverLaneCount, effectiveStreamWindowSize))
     private val ackBatchSize = 64
     private val ackFlushIntervalMs = 120L
     private val resumeProbeIntervalMs = 1_500L
@@ -115,7 +117,8 @@ class StreamTransferController(
                 return@launch
             }
             val totalChunks = ((fileSize + streamChunkSize - 1) / streamChunkSize).toInt()
-            val requestedLaneCount = max(1, min(effectiveStreamLaneCount, totalChunks))
+            val requestedSenderLaneCount = max(1, min(effectiveStreamSenderLaneCount, totalChunks))
+            val requestedReceiverLaneCount = max(1, min(effectiveStreamReceiverLaneCount, totalChunks))
             val request = StreamTransferInitRequestDto(
                 streamChatId = streamChatId,
                 fileName = file.name,
@@ -124,7 +127,8 @@ class StreamTransferController(
                 fileHashAlgorithm = "NONE",
                 chunkHashAlgorithm = CHUNK_HASH_NONE,
                 chunkSize = streamChunkSize,
-                laneCount = requestedLaneCount,
+                senderLaneCount = requestedSenderLaneCount,
+                receiverLaneCount = requestedReceiverLaneCount,
                 totalChunks = totalChunks,
                 contentType = file.contentType
             )
@@ -142,7 +146,7 @@ class StreamTransferController(
                 file = file,
                 fileSize = fileSize,
                 chunkSize = streamChunkSize,
-                laneCount = max(1, response.laneCount),
+                senderLaneCount = max(1, response.senderLaneCount),
                 totalChunks = totalChunks,
                 windowSize = effectiveStreamWindowSize,
                 chunkHashAlgorithm = request.chunkHashAlgorithm
@@ -150,7 +154,8 @@ class StreamTransferController(
             println(
                 "[STREAM][TX] start id=${response.transferId} chunks=$totalChunks " +
                     "chunk=$streamChunkSize mode=ws-stream " +
-                    "lanes=${max(1, response.laneCount)} " +
+                    "senderLanes=${max(1, response.senderLaneCount)} " +
+                    "receiverLanes=${max(1, response.receiverLaneCount)} " +
                     "buffer=${effectiveStreamWindowSize * streamChunkSize} " +
                     "ack=${ackBatchSize}/${ackFlushIntervalMs}ms"
             )
@@ -197,12 +202,13 @@ class StreamTransferController(
             offer = offer,
             tempPath = tempPath,
             saveTarget = target,
-            laneCount = max(1, offer.laneCount),
+            receiverLaneCount = max(1, offer.receiverLaneCount),
             lastChunkAt = System.currentTimeMillis()
         )
         println(
             "[STREAM][RX] start id=${offer.transferId} chunks=${offer.totalChunks} " +
-                "chunk=${offer.chunkSize} lanes=${max(1, offer.laneCount)}"
+                "chunk=${offer.chunkSize} senderLanes=${max(1, offer.senderLaneCount)} " +
+                "receiverLanes=${max(1, offer.receiverLaneCount)}"
         )
         updateState(
             StreamTransferUiState(
@@ -220,7 +226,7 @@ class StreamTransferController(
                 transferId = offer.transferId,
                 role = StreamTransferSocketRole.Receiver,
                 streamChatId = offer.streamChatId,
-                laneCount = max(1, offer.laneCount)
+                laneCount = max(1, offer.receiverLaneCount)
             )
         ) {
             streamStorage.deleteTempFile(tempPath)
@@ -388,7 +394,7 @@ class StreamTransferController(
                 transferredChunks = context.sentSeqs.size
             )
         )
-        for (lane in 0 until context.laneCount) {
+        for (lane in 0 until context.senderLaneCount) {
             sendJobs[lane] = scope.launch(Dispatchers.IO) {
                 runSenderLaneWorker(context, lane)
             }
@@ -512,7 +518,7 @@ class StreamTransferController(
             onWaitingForWindow()
             return null
         }
-        context.nextSeqByLane[lane] = nextSeq + context.laneCount
+        context.nextSeqByLane[lane] = nextSeq + context.senderLaneCount
         context.inFlight.add(nextSeq)
         return nextSeq
     }
@@ -827,7 +833,7 @@ class StreamTransferController(
                         if (ctx.ackedSeqs.contains(seq)) return@forEach
                         ctx.inFlight.remove(seq)
                         if (ctx.resendSet.add(seq)) {
-                            ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
+                            ctx.resendQueues[laneForSeq(seq, ctx.senderLaneCount)].add(seq)
                         }
                     }
                     ctx.lastAckAt = System.currentTimeMillis()
@@ -843,7 +849,7 @@ class StreamTransferController(
                         if (ctx.ackedSeqs.contains(seq)) return@forEach
                         ctx.inFlight.remove(seq)
                         if (ctx.resendSet.add(seq)) {
-                            ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
+                            ctx.resendQueues[laneForSeq(seq, ctx.senderLaneCount)].add(seq)
                         }
                     }
                     ctx.lastAckAt = System.currentTimeMillis()
@@ -907,7 +913,7 @@ class StreamTransferController(
                             if (ctx.ackedSeqs.contains(seq)) return@forEach
                             ctx.inFlight.remove(seq)
                             if (ctx.resendSet.add(seq)) {
-                                ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
+                                ctx.resendQueues[laneForSeq(seq, ctx.senderLaneCount)].add(seq)
                             }
                         }
                         ctx.lastAckAt = now
@@ -932,7 +938,7 @@ class StreamTransferController(
                         transferId = ctx.transferId,
                         role = StreamTransferSocketRole.Receiver,
                         streamChatId = ctx.offer.streamChatId,
-                        laneCount = ctx.laneCount
+                        laneCount = ctx.receiverLaneCount
                     )
                 ) {
                     continue

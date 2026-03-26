@@ -11,6 +11,12 @@ plugins {
 group = "com.messenger"
 version = "1.0.0"
 
+val desktopRuntimeJvmArgs = listOf(
+    "-Xms256m",
+    "-Xmx1024m",
+    "-Djava.io.tmpdir=${project.projectDir}/.tmp"
+)
+
 kotlin {
     jvmToolchain(17)
 
@@ -96,7 +102,7 @@ kotlin {
 compose.desktop {
     application {
         mainClass = "com.messenger.client.MainKt"
-        jvmArgs("-Djava.io.tmpdir=${project.projectDir}/.tmp")
+        jvmArgs(*desktopRuntimeJvmArgs.toTypedArray())
         nativeDistributions {
             targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg, org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi, org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb)
             packageName = "MessengerClient"
@@ -106,7 +112,7 @@ compose.desktop {
 }
 
 tasks.withType<JavaExec>().configureEach {
-    jvmArgs("-Djava.io.tmpdir=${project.projectDir}/.tmp")
+    jvmArgs(*desktopRuntimeJvmArgs.toTypedArray())
 }
 
 android {
