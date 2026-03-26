@@ -44,6 +44,7 @@ kotlin {
                 implementation(compose.material3)
                 implementation(compose.materialIconsExtended)
                 implementation("io.ktor:ktor-client-core:2.3.8")
+                implementation("io.ktor:ktor-client-websockets:2.3.8")
                 implementation("io.ktor:ktor-client-content-negotiation:2.3.8")
                 implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.8")
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
@@ -67,6 +68,7 @@ kotlin {
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation("io.ktor:ktor-client-cio:2.3.8")
+                implementation("io.ktor:ktor-client-okhttp:2.3.8")
                 implementation("com.microsoft.signalr:signalr:7.0.14")
                 implementation("io.reactivex.rxjava3:rxjava:3.1.8")
                 implementation("com.google.code.gson:gson:2.10.1")

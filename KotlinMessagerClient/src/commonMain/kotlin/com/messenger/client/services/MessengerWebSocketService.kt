@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.SharedFlow
 expect class MessengerWebSocketService(
     serverUrl: String = defaultServerUrl
 ) {
+    val serverUrl: String
+    val currentToken: String?
     val newMessages: SharedFlow<NewMessageEventDto>
     val messageRead: SharedFlow<MessageReadEventDto>
     val typing: SharedFlow<TypingEventDto>

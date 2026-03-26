@@ -41,24 +41,38 @@ actual fun rememberStreamTransferStorage(): StreamTransferStorage {
         object : StreamTransferStorage {
             private val writerLock = Any()
             private val writers = mutableMapOf<String, RandomAccessFile>()
+            private val nextOffsets = mutableMapOf<String, Long>()
 
-            override fun createTempFile(transferId: String, fileName: String): String {
+            override fun createTempFile(transferId: String, fileName: String, expectedSize: Long): String {
                 val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
                 val file = File(tempDir, "${transferId}_$safeName.part")
                 file.parentFile?.mkdirs()
                 if (!file.exists()) {
                     file.createNewFile()
                 }
+                if (expectedSize > 0) {
+                    RandomAccessFile(file, "rw").use { raf ->
+                        if (raf.length() != expectedSize) {
+                            raf.setLength(expectedSize)
+                        }
+                    }
+                }
                 return file.absolutePath
             }
 
-            override fun writeChunk(path: String, offset: Long, data: ByteArray) {
+            override fun writeChunk(path: String, offset: Long, data: ByteArray, dataOffset: Int, dataLength: Int) {
                 val raf = synchronized(writerLock) {
                     writers.getOrPut(path) { RandomAccessFile(path, "rw") }
                 }
                 synchronized(raf) {
-                    raf.seek(offset)
-                    raf.write(data)
+                    val nextOffset = synchronized(writerLock) { nextOffsets[path] ?: 0L }
+                    if (nextOffset != offset) {
+                        raf.seek(offset)
+                    }
+                    raf.write(data, dataOffset, dataLength)
+                    synchronized(writerLock) {
+                        nextOffsets[path] = offset + dataLength
+                    }
                 }
             }
 
@@ -117,7 +131,10 @@ actual fun rememberStreamTransferStorage(): StreamTransferStorage {
             }
 
             private fun closeWriter(path: String) {
-                val writer = synchronized(writerLock) { writers.remove(path) } ?: return
+                val writer = synchronized(writerLock) {
+                    nextOffsets.remove(path)
+                    writers.remove(path)
+                } ?: return
                 runCatching { writer.close() }
             }
         }

@@ -10,6 +10,7 @@ data class StreamPickedFile(
 )
 
 interface StreamFileSource {
+    fun prepareForStreaming() {}
     fun readChunk(offset: Long, size: Int): ByteArray
     fun computeSha256Base64(): String
     fun getSize(): Long

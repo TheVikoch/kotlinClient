@@ -99,12 +99,18 @@ private class AndroidStreamFileSource(
     private var cacheRaf: java.io.RandomAccessFile? = null
     private var cachedSize: Long = 0
 
+    override fun prepareForStreaming() {
+        synchronized(lock) {
+            ensureCacheFile() ?: throw IllegalStateException("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРіРѕС‚РѕРІРёС‚СЊ С„Р°Р№Р» РґР»СЏ РѕС‚РїСЂР°РІРєРё")
+        }
+    }
+
     override fun readChunk(offset: Long, size: Int): ByteArray {
         if (size <= 0) return ByteArray(0)
         val buffer = ByteArray(size)
         var totalRead = 0
         synchronized(lock) {
-            val fileChannel = ensureChannel() ?: return ByteArray(0)
+            val fileChannel = ensureCacheChannel() ?: ensureChannel() ?: return ByteArray(0)
             fileChannel.position(offset)
             val byteBuffer = ByteBuffer.wrap(buffer)
             while (totalRead < size) {
@@ -213,7 +219,6 @@ private class AndroidStreamFileSource(
         if (cacheFile != null) return cacheFile
         val tempDir = File(context.cacheDir, "stream-send-cache").apply { mkdirs() }
         val outFile = File.createTempFile("stream_", ".bin", tempDir)
-        val digest = MessageDigest.getInstance("SHA-256")
         val input = resolver.openInputStream(uri) ?: return null
         var total = 0L
         input.use { source ->
@@ -223,7 +228,6 @@ private class AndroidStreamFileSource(
                     val read = source.read(buf)
                     if (read <= 0) break
                     output.write(buf, 0, read)
-                    digest.update(buf, 0, read)
                     total += read
                 }
                 output.flush()
@@ -231,7 +235,7 @@ private class AndroidStreamFileSource(
         }
         cachedSize = if (total > 0) total else outFile.length()
         cacheFile = outFile
-        cachedHash = Base64.encodeToString(digest.digest(), Base64.NO_WRAP)
+        cachedHash = null
         return outFile
     }
 

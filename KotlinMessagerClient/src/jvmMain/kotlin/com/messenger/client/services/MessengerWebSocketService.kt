@@ -32,7 +32,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 
 actual class MessengerWebSocketService actual constructor(
-    private val serverUrl: String
+    actual val serverUrl: String
 ) {
     private val gson = Gson()
     private val gsonUpper = GsonBuilder()
@@ -40,6 +40,10 @@ actual class MessengerWebSocketService actual constructor(
         .create()
     private var connection: HubConnection? = null
     private var _isConnected: Boolean = false
+    private var activeToken: String? = null
+
+    actual val currentToken: String?
+        get() = activeToken
 
     private val _newMessages = MutableSharedFlow<NewMessageEventDto>(extraBufferCapacity = 64)
     actual val newMessages: SharedFlow<NewMessageEventDto> = _newMessages
@@ -58,6 +62,7 @@ actual class MessengerWebSocketService actual constructor(
 
     actual fun connect(jwtToken: String): Boolean {
         return try {
+            activeToken = jwtToken
             val existing = connection
             if (existing != null) {
                 when (existing.connectionState) {
@@ -104,6 +109,7 @@ actual class MessengerWebSocketService actual constructor(
         } finally {
             connection = null
             _isConnected = false
+            activeToken = null
         }
     }
 

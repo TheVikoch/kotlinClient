@@ -1,9 +1,8 @@
-package com.messenger.client.transfer
+﻿package com.messenger.client.transfer
 
 import com.messenger.client.media.StreamPickedFile
 import com.messenger.client.media.StreamTransferStorage
 import com.messenger.client.media.base64Decode
-import com.messenger.client.media.base64Encode
 import com.messenger.client.media.crc32Hex
 import com.messenger.client.media.sha256Base64ForFile
 import com.messenger.client.models.StreamTransferChunkDto
@@ -16,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -31,7 +31,9 @@ class StreamTransferController(
     private val webSocketService: MessengerWebSocketService,
     private val streamStorage: StreamTransferStorage,
     private val streamChunkSize: Int = 2 * 1024 * 1024,
-    private val streamWindowSize: Int = 64
+    private val streamWindowSize: Int = 64,
+    private val streamMaxBufferedBytes: Int = 32 * 1024 * 1024,
+    private val streamLaneCount: Int = 4
 ) {
     companion object {
         private const val DEFERRED_FILE_HASH = "DEFERRED"
@@ -40,8 +42,14 @@ class StreamTransferController(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val ackBatchSize = 16
-    private val ackFlushIntervalMs = 150L
+    private val effectiveStreamWindowSize = max(
+        4,
+        min(streamWindowSize, max(1, streamMaxBufferedBytes / streamChunkSize))
+    )
+    private val effectiveStreamLaneCount = max(1, min(streamLaneCount, effectiveStreamWindowSize))
+    private val ackBatchSize = 64
+    private val ackFlushIntervalMs = 120L
+    private val resumeProbeIntervalMs = 1_500L
     private val progressUpdateIntervalMs = 200L
     private val progressUpdateChunkStep = 8
 
@@ -56,46 +64,58 @@ class StreamTransferController(
 
     private var senderContext: StreamSenderContext? = null
     private var receiverContext: StreamReceiverContext? = null
-    private var sendJob: Job? = null
+    private val sendJobs = mutableMapOf<Int, Job>()
     private var phaseTimeoutJob: Job? = null
+    private val binaryChannel = StreamTransferBinaryChannel(webSocketService.serverUrl)
 
     init {
+        scope.launch {
+            binaryChannel.incomingFrames.collect { frame ->
+                val ctx = receiverContext ?: return@collect
+                if (ctx.transferId != frame.transferId) return@collect
+                handleIncomingBinaryFrame(ctx, frame)
+            }
+        }
         scope.launch {
             webSocketService.streamEvents.collect { event ->
                 handleStreamEvent(event)
             }
         }
-        startAckWatchdog()
         startReceiverAckFlushLoop()
         startReceiverResumeLoop()
+        startAckWatchdog()
         startTelemetryLoop()
     }
 
     fun startTransfer(file: StreamPickedFile, streamChatId: String) {
         val phase = _state.value?.phase
         if (isActiveStreamPhase(phase)) {
-            emitError(streamChatId, "Передача уже активна")
+            emitError(streamChatId, "РџРµСЂРµРґР°С‡Р° СѓР¶Рµ Р°РєС‚РёРІРЅР°")
             file.source.close()
             return
         }
         if (!webSocketService.isConnected) {
-            emitError(streamChatId, "Нет подключения к серверу")
+            emitError(streamChatId, "РќРµС‚ РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє СЃРµСЂРІРµСЂСѓ")
             file.source.close()
             return
         }
         clearError()
         scope.launch {
             var fileSize = file.size
-            val actualSize = withContext(Dispatchers.IO) { file.source.getSize() }
+            val actualSize = withContext(Dispatchers.IO) {
+                file.source.prepareForStreaming()
+                file.source.getSize()
+            }
             if (actualSize > 0) {
                 fileSize = actualSize
             }
             if (fileSize <= 0) {
-                emitError(streamChatId, "Файл пустой или недоступен")
+                emitError(streamChatId, "Р¤Р°Р№Р» РїСѓСЃС‚РѕР№ РёР»Рё РЅРµРґРѕСЃС‚СѓРїРµРЅ")
                 file.source.close()
                 return@launch
             }
             val totalChunks = ((fileSize + streamChunkSize - 1) / streamChunkSize).toInt()
+            val requestedLaneCount = max(1, min(effectiveStreamLaneCount, totalChunks))
             val request = StreamTransferInitRequestDto(
                 streamChatId = streamChatId,
                 fileName = file.name,
@@ -104,6 +124,7 @@ class StreamTransferController(
                 fileHashAlgorithm = "NONE",
                 chunkHashAlgorithm = CHUNK_HASH_NONE,
                 chunkSize = streamChunkSize,
+                laneCount = requestedLaneCount,
                 totalChunks = totalChunks,
                 contentType = file.contentType
             )
@@ -111,7 +132,7 @@ class StreamTransferController(
                 webSocketService.startStreamTransfer(request)
             }
             if (response == null || response.transferId.isBlank()) {
-                emitError(streamChatId, "Не удалось начать передачу")
+                emitError(streamChatId, "РќРµ СѓРґР°Р»РѕСЃСЊ РЅР°С‡Р°С‚СЊ РїРµСЂРµРґР°С‡Сѓ")
                 file.source.close()
                 return@launch
             }
@@ -121,11 +142,18 @@ class StreamTransferController(
                 file = file,
                 fileSize = fileSize,
                 chunkSize = streamChunkSize,
+                laneCount = max(1, response.laneCount),
                 totalChunks = totalChunks,
-                windowSize = streamWindowSize,
+                windowSize = effectiveStreamWindowSize,
                 chunkHashAlgorithm = request.chunkHashAlgorithm
             )
-            println("[STREAM][TX] start id=${response.transferId} chunks=$totalChunks chunk=$streamChunkSize window=$streamWindowSize")
+            println(
+                "[STREAM][TX] start id=${response.transferId} chunks=$totalChunks " +
+                    "chunk=$streamChunkSize mode=ws-stream " +
+                    "lanes=${max(1, response.laneCount)} " +
+                    "buffer=${effectiveStreamWindowSize * streamChunkSize} " +
+                    "ack=${ackBatchSize}/${ackFlushIntervalMs}ms"
+            )
             updateState(
                 StreamTransferUiState(
                     transferId = response.transferId,
@@ -145,7 +173,7 @@ class StreamTransferController(
         clearError()
         val available = streamStorage.availableBytes()
         if (available < offer.fileSize) {
-            emitError(offer.streamChatId, "Недостаточно места для файла")
+            emitError(offer.streamChatId, "РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РјРµСЃС‚Р° РґР»СЏ С„Р°Р№Р»Р°")
             webSocketService.rejectStreamTransfer(offer.transferId, "not_enough_space")
             _offer.value = null
             return
@@ -153,7 +181,7 @@ class StreamTransferController(
         val target = try {
             withContext(Dispatchers.Main) { streamStorage.pickSaveTarget(offer.fileName, offer.contentType) }
         } catch (e: Exception) {
-            emitError(offer.streamChatId, "Не удалось открыть выбор папки")
+            emitError(offer.streamChatId, "РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ РІС‹Р±РѕСЂ РїР°РїРєРё")
             webSocketService.rejectStreamTransfer(offer.transferId, "picker_failed")
             _offer.value = null
             return
@@ -163,15 +191,19 @@ class StreamTransferController(
             _offer.value = null
             return
         }
-        val tempPath = streamStorage.createTempFile(offer.transferId, offer.fileName)
+        val tempPath = streamStorage.createTempFile(offer.transferId, offer.fileName, offer.fileSize)
         receiverContext = StreamReceiverContext(
             transferId = offer.transferId,
             offer = offer,
             tempPath = tempPath,
             saveTarget = target,
+            laneCount = max(1, offer.laneCount),
             lastChunkAt = System.currentTimeMillis()
         )
-        println("[STREAM][RX] start id=${offer.transferId} chunks=${offer.totalChunks} chunk=${offer.chunkSize}")
+        println(
+            "[STREAM][RX] start id=${offer.transferId} chunks=${offer.totalChunks} " +
+                "chunk=${offer.chunkSize} lanes=${max(1, offer.laneCount)}"
+        )
         updateState(
             StreamTransferUiState(
                 transferId = offer.transferId,
@@ -184,6 +216,20 @@ class StreamTransferController(
                 phase = StreamTransferPhase.Transferring
             )
         )
+        if (!ensureBinaryChannelsConnected(
+                transferId = offer.transferId,
+                role = StreamTransferSocketRole.Receiver,
+                streamChatId = offer.streamChatId,
+                laneCount = max(1, offer.laneCount)
+            )
+        ) {
+            streamStorage.deleteTempFile(tempPath)
+            receiverContext = null
+            binaryChannel.disconnect()
+            webSocketService.rejectStreamTransfer(offer.transferId, "binary_channel_failed")
+            _offer.value = null
+            return
+        }
         webSocketService.acceptStreamTransfer(offer.transferId)
         _offer.value = null
     }
@@ -210,7 +256,8 @@ class StreamTransferController(
         closeSenderContext()
         receiverContext?.let { streamStorage.deleteTempFile(it.tempPath) }
         receiverContext = null
-        updateState(_state.value?.copy(phase = StreamTransferPhase.Canceled, message = "Отменено пользователем"))
+        updateState(_state.value?.copy(phase = StreamTransferPhase.Canceled, message = "РћС‚РјРµРЅРµРЅРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј"))
+        binaryChannel.disconnect()
         if (webSocketService.isConnected) {
             webSocketService.cancelStreamTransfer(transferId, reason)
         }
@@ -222,6 +269,7 @@ class StreamTransferController(
 
     fun resetForLogout() {
         cancelActiveTransfer("logout")
+        binaryChannel.disconnect()
         _offer.value = null
         _state.value = null
         _error.value = null
@@ -239,9 +287,9 @@ class StreamTransferController(
                 val current = _state.value ?: return@launch
                 if (current.transferId != state.transferId || current.phase != state.phase) return@launch
                 if (current.phase == StreamTransferPhase.AwaitingAcceptance) {
-                    emitError(current.streamChatId, "Нет подтверждения от получателя")
+                    emitError(current.streamChatId, "РќРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РѕС‚ РїРѕР»СѓС‡Р°С‚РµР»СЏ")
                 } else if (current.phase == StreamTransferPhase.WaitingComplete) {
-                    emitError(current.streamChatId, "Получатель не завершил передачу")
+                    emitError(current.streamChatId, "РџРѕР»СѓС‡Р°С‚РµР»СЊ РЅРµ Р·Р°РІРµСЂС€РёР» РїРµСЂРµРґР°С‡Сѓ")
                 }
             }
         }
@@ -254,20 +302,21 @@ class StreamTransferController(
     private fun closeSenderContext() {
         val ctx = senderContext
         senderContext = null
-        sendJob?.cancel()
-        sendJob = null
+        sendJobs.values.forEach { it.cancel() }
+        sendJobs.clear()
         if (ctx != null) {
             scope.launch(Dispatchers.IO) {
                 ctx.readMutex.withLock {
                     ctx.file.source.close()
                 }
             }
+            binaryChannel.disconnect()
         }
     }
 
-    private suspend fun sendStreamChunk(context: StreamSenderContext, seq: Int) {
+    private suspend fun sendStreamChunk(context: StreamSenderContext, lane: Int, seq: Int) {
         if (context.fileSize <= 0) {
-            throw IllegalStateException("Размер файла недоступен для отправки")
+            throw IllegalStateException("Р Р°Р·РјРµСЂ С„Р°Р№Р»Р° РЅРµРґРѕСЃС‚СѓРїРµРЅ РґР»СЏ РѕС‚РїСЂР°РІРєРё")
         }
         val offset = seq.toLong() * context.chunkSize.toLong()
         if (offset >= context.fileSize) return
@@ -277,101 +326,195 @@ class StreamTransferController(
             context.file.source.readChunk(offset, readSize)
         }
         if (chunkBytes.isEmpty()) {
-            throw IllegalStateException("Не удалось прочитать чанк")
+            throw IllegalStateException("РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕС‡РёС‚Р°С‚СЊ С‡Р°РЅРє")
         }
-        val chunkHash = if (context.chunkHashAlgorithm.equals(CHUNK_HASH_CRC32, ignoreCase = true)) {
-            crc32Hex(chunkBytes)
-        } else {
-            ""
-        }
-        val chunkBase64 = base64Encode(chunkBytes)
         val isLast = seq == context.totalChunks - 1
-        webSocketService.sendStreamChunk(
-            StreamTransferChunkDto(
-                transferId = context.transferId,
-                seq = seq,
-                data = chunkBase64,
-                chunkHash = chunkHash,
-                isLast = isLast
-            )
-        )
+        binaryChannel.sendChunk(context.transferId, lane, seq, chunkBytes, isLast)
+    }
+
+    private suspend fun ensureBinaryLaneConnected(
+        transferId: String,
+        role: StreamTransferSocketRole,
+        streamChatId: String,
+        lane: Int
+    ): Boolean {
+        if (binaryChannel.isConnectedFor(transferId, role, lane)) {
+            return true
+        }
+        if (!webSocketService.isConnected) {
+            return false
+        }
+        val token = webSocketService.currentToken
+        if (token.isNullOrBlank()) {
+            emitError(streamChatId, "Р СњР ВµРЎвЂљ РЎвЂљР С•Р С”Р ВµР Р…Р В° Р В°Р Р†РЎвЂљР С•РЎР‚Р С‘Р В·Р В°РЎвЂ Р С‘Р С‘ Р Т‘Р В»РЎРЏ Р С—Р ВµРЎР‚Р ВµР Т‘Р В°РЎвЂЎР С‘")
+            return false
+        }
+        val connected = binaryChannel.connectLane(transferId, role, token, lane)
+        if (!connected) {
+            val reason = binaryChannel.state.value.lastError
+                ?: "Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—Р С•Р Т‘Р С”Р В»РЎР‹РЎвЂЎР С‘РЎвЂљРЎРЉ Р В±Р С‘Р Р…Р В°РЎР‚Р Р…РЎвЂ№Р в„– Р С”Р В°Р Р…Р В°Р В»"
+            emitError(streamChatId, reason)
+        }
+        return connected
+    }
+
+    private suspend fun ensureBinaryChannelsConnected(
+        transferId: String,
+        role: StreamTransferSocketRole,
+        streamChatId: String,
+        laneCount: Int
+    ): Boolean {
+        for (lane in 0 until laneCount) {
+            if (!ensureBinaryLaneConnected(transferId, role, streamChatId, lane)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun laneForSeq(seq: Int, laneCount: Int): Int {
+        return seq.mod(max(1, laneCount))
     }
 
     private fun startSendingChunks(context: StreamSenderContext) {
-        sendJob?.cancel()
-        sendJob = scope.launch(Dispatchers.IO) {
-            context.stateMutex.withLock {
-                if (context.lastAckAt <= 0) {
-                    context.lastAckAt = System.currentTimeMillis()
+        sendJobs.values.forEach { it.cancel() }
+        sendJobs.clear()
+        if (context.lastAckAt <= 0) {
+            context.lastAckAt = System.currentTimeMillis()
+        }
+        updateState(
+            _state.value?.copy(
+                phase = StreamTransferPhase.Transferring,
+                transferredChunks = context.sentSeqs.size
+            )
+        )
+        for (lane in 0 until context.laneCount) {
+            sendJobs[lane] = scope.launch(Dispatchers.IO) {
+                runSenderLaneWorker(context, lane)
+            }
+        }
+    }
+
+    private suspend fun runSenderLaneWorker(context: StreamSenderContext, lane: Int) {
+        while (currentCoroutineContext().isActive) {
+            if (!webSocketService.isConnected) {
+                delay(250)
+                continue
+            }
+            if (!ensureBinaryLaneConnected(context.transferId, StreamTransferSocketRole.Sender, context.streamChatId, lane)) {
+                delay(500)
+                continue
+            }
+            var waitingForWindow = false
+            val seqToSend = context.stateMutex.withLock {
+                pullNextSeqForLaneLocked(context, lane) {
+                    waitingForWindow = true
                 }
             }
-            updateState(
-                _state.value?.copy(
-                    phase = StreamTransferPhase.Transferring,
-                    transferredChunks = context.ackedSeqs.size
-                )
-            )
-            while (isActive) {
-                if (!webSocketService.isConnected) {
-                    delay(250)
-                    continue
-                }
-                val seqToSend: Int? = context.stateMutex.withLock {
-                    while (context.resendQueue.isNotEmpty()) {
-                        val seq = context.resendQueue.removeFirst()
-                        context.resendSet.remove(seq)
-                        if (context.ackedSeqs.contains(seq)) continue
-                        context.inFlight.add(seq)
-                        return@withLock seq
-                    }
-                    if (context.inFlight.size >= context.adaptiveWindowSize) {
-                        return@withLock -1
-                    }
-                    if (context.nextSeq >= context.totalChunks) {
-                        return@withLock if (context.inFlight.isEmpty()) null else -1
-                    }
-                    val seq = context.nextSeq
-                    context.nextSeq += 1
-                    context.inFlight.add(seq)
-                    seq
-                }
-                when (seqToSend) {
-                    null -> break
-                    -1 -> {
-                        delay(10)
+            when (seqToSend) {
+                null -> {
+                    if (waitingForWindow) {
+                        delay(4)
                         continue
                     }
-                    else -> {
-                        val sendResult = runCatching { sendStreamChunk(context, seqToSend) }
-                        if (sendResult.isFailure) {
-                            val error = sendResult.exceptionOrNull()
-                            if (error is IllegalStateException) {
-                                emitError(context.streamChatId, error.message ?: "Ошибка чтения файла")
-                                updateState(_state.value?.copy(phase = StreamTransferPhase.Failed, message = error.message))
-                                closeSenderContext()
-                                return@launch
+                    val allAcked = context.stateMutex.withLock { context.ackedSeqs.size >= context.totalChunks }
+                    if (allAcked && _state.value?.phase == StreamTransferPhase.Transferring) {
+                        updateState(
+                            _state.value?.copy(
+                                phase = StreamTransferPhase.WaitingComplete,
+                                transferredChunks = context.totalChunks
+                            )
+                        )
+                    }
+                    delay(25)
+                }
+                else -> {
+                    val sendResult = runCatching { sendStreamChunk(context, lane, seqToSend) }
+                    if (sendResult.isFailure) {
+                        val error = sendResult.exceptionOrNull()
+                        if (error is IllegalStateException) {
+                            emitError(context.streamChatId, error.message ?: "Ошибка чтения файла")
+                            updateState(_state.value?.copy(phase = StreamTransferPhase.Failed, message = error.message))
+                            closeSenderContext()
+                            return
+                        }
+                        context.stateMutex.withLock {
+                            if (!context.ackedSeqs.contains(seqToSend) && context.resendSet.add(seqToSend)) {
+                                context.resendQueues[lane].add(seqToSend)
                             }
-                            // Don't cancel transfer, just requeue for resend.
-                            context.stateMutex.withLock {
-                                if (!context.ackedSeqs.contains(seqToSend) && context.resendSet.add(seqToSend)) {
-                                    context.resendQueue.add(seqToSend)
-                                }
-                                context.inFlight.remove(seqToSend)
+                            context.inFlight.remove(seqToSend)
+                        }
+                        binaryChannel.disconnectLane(lane)
+                        registerCongestion(context, 1, "send_error")
+                        emitError(context.streamChatId, "Связь нестабильна, пробуем возобновить…")
+                        delay(250)
+                    } else {
+                        var sentCount = 0
+                        var shouldUpdateProgress = false
+                        context.stateMutex.withLock {
+                            context.sentChunks += 1
+                            context.sentSeqs.add(seqToSend)
+                            sentCount = context.sentSeqs.size
+                            val now = System.currentTimeMillis()
+                            if (shouldEmitProgress(
+                                    lastChunks = context.lastProgressChunks,
+                                    currentChunks = sentCount,
+                                    totalChunks = context.totalChunks,
+                                    lastAt = context.lastProgressAt,
+                                    now = now
+                                )
+                            ) {
+                                shouldUpdateProgress = true
+                                context.lastProgressChunks = sentCount
+                                context.lastProgressAt = now
                             }
-                            registerCongestion(context, 1, "send_error")
-                            emitError(context.streamChatId, "Связь нестабильна, пробуем возобновить…")
-                            delay(500)
-                        } else {
-                            context.stateMutex.withLock {
-                                context.sentChunks += 1
-                            }
+                        }
+                        if (shouldUpdateProgress) {
+                            clearError()
+                            updateState(_state.value?.copy(transferredChunks = sentCount))
                         }
                     }
                 }
             }
-            if (!isActive) return@launch
-            updateState(_state.value?.copy(phase = StreamTransferPhase.WaitingComplete))
         }
+    }
+
+    private fun pullNextSeqForLaneLocked(
+        context: StreamSenderContext,
+        lane: Int,
+        onWaitingForWindow: () -> Unit
+    ): Int? {
+        val windowSize = max(1, context.adaptiveWindowSize)
+        if (context.inFlight.size >= windowSize) {
+            onWaitingForWindow()
+            return null
+        }
+        val laneQueue = context.resendQueues[lane]
+        while (laneQueue.isNotEmpty()) {
+            val seq = laneQueue.removeFirst()
+            context.resendSet.remove(seq)
+            if (context.ackedSeqs.contains(seq)) continue
+            if (context.inFlight.size >= windowSize) {
+                onWaitingForWindow()
+                if (context.resendSet.add(seq)) {
+                    laneQueue.addFirst(seq)
+                }
+                return null
+            }
+            context.inFlight.add(seq)
+            return seq
+        }
+        val nextSeq = context.nextSeqByLane[lane]
+        if (nextSeq >= context.totalChunks) {
+            return null
+        }
+        if (context.inFlight.size >= windowSize) {
+            onWaitingForWindow()
+            return null
+        }
+        context.nextSeqByLane[lane] = nextSeq + context.laneCount
+        context.inFlight.add(nextSeq)
+        return nextSeq
     }
 
     private suspend fun handleIncomingChunk(context: StreamReceiverContext, chunk: StreamTransferChunkDto) {
@@ -413,6 +556,10 @@ class StreamTransferController(
                     }
                 }
                 context.lastChunkAt = now
+                context.highestSeqReceived = max(context.highestSeqReceived, chunk.seq)
+                if (chunk.isLast) {
+                    context.lastChunkReceived = true
+                }
                 tuneAckStrategy(context)
                 val offset = chunk.seq.toLong() * context.offer.chunkSize.toLong()
                 streamStorage.writeChunk(context.tempPath, offset, payloadBytes)
@@ -467,7 +614,7 @@ class StreamTransferController(
                         updateState(
                             _state.value?.copy(
                                 phase = StreamTransferPhase.Failed,
-                                message = "Хэш не совпал"
+                                message = "РҐСЌС€ РЅРµ СЃРѕРІРїР°Р»"
                             )
                         )
                         streamStorage.deleteTempFile(context.tempPath)
@@ -494,6 +641,116 @@ class StreamTransferController(
             }
     }
 
+    private suspend fun handleIncomingBinaryFrame(context: StreamReceiverContext, frame: StreamTransferBinaryFrame) {
+        var ackSeqs: List<Int> = emptyList()
+        var received = 0
+        var shouldUpdateProgress = false
+        var isComplete = false
+        context.receivedMutex.withLock {
+            if (!context.receivedSeqs.add(frame.seq)) {
+                context.pendingAckSeqs.add(frame.seq)
+                ackSeqs = drainPendingAcksLocked(context, force = true)
+                return@withLock
+            }
+            val now = System.currentTimeMillis()
+            if (context.lastChunkAt > 0) {
+                val gap = (now - context.lastChunkAt).coerceAtLeast(1L)
+                context.averageChunkGapMs = if (context.averageChunkGapMs <= 0) {
+                    gap
+                } else {
+                    (context.averageChunkGapMs * 7 + gap) / 8
+                }
+            }
+            context.lastChunkAt = now
+            context.highestSeqReceived = max(context.highestSeqReceived, frame.seq)
+            if (frame.isLast) {
+                context.lastChunkReceived = true
+            }
+            tuneAckStrategy(context)
+            val offset = frame.seq.toLong() * context.offer.chunkSize.toLong()
+            streamStorage.writeChunk(
+                context.tempPath,
+                offset,
+                frame.buffer,
+                frame.dataOffset,
+                frame.dataLength
+            )
+            context.pendingAckSeqs.add(frame.seq)
+            received = context.receivedSeqs.size
+            isComplete = received >= context.offer.totalChunks
+            if (isComplete ||
+                context.pendingAckSeqs.size >= context.dynamicAckBatchSize ||
+                now - context.lastAckFlushAt >= context.dynamicAckFlushIntervalMs
+            ) {
+                ackSeqs = drainPendingAcksLocked(context, force = true)
+            }
+            if (shouldEmitProgress(
+                    lastChunks = context.lastProgressChunks,
+                    currentChunks = received,
+                    totalChunks = context.offer.totalChunks,
+                    lastAt = context.lastProgressAt,
+                    now = now
+                )
+            ) {
+                shouldUpdateProgress = true
+                context.lastProgressChunks = received
+                context.lastProgressAt = now
+            }
+        }
+        if (ackSeqs.isNotEmpty()) {
+            webSocketService.ackStreamChunks(context.transferId, ackSeqs)
+        }
+        if (shouldUpdateProgress) {
+            clearError()
+            updateState(_state.value?.copy(transferredChunks = received))
+        }
+        if (isComplete) {
+            val finalAck = context.receivedMutex.withLock {
+                drainPendingAcksLocked(context, force = true)
+            }
+            if (finalAck.isNotEmpty()) {
+                webSocketService.ackStreamChunks(context.transferId, finalAck)
+            }
+            updateState(_state.value?.copy(phase = StreamTransferPhase.Verifying))
+            val shouldVerifyHash = context.offer.fileHash.isNotBlank() &&
+                !context.offer.fileHash.equals(DEFERRED_FILE_HASH, ignoreCase = true) &&
+                !context.offer.fileHashAlgorithm.equals("NONE", ignoreCase = true)
+            if (shouldVerifyHash) {
+                val fileHash = sha256Base64ForFile(context.tempPath)
+                if (!fileHash.equals(context.offer.fileHash, ignoreCase = true)) {
+                    webSocketService.cancelStreamTransfer(context.transferId, "hash_mismatch")
+                    updateState(
+                        _state.value?.copy(
+                            phase = StreamTransferPhase.Failed,
+                            message = "Р ТђРЎРЊРЎв‚¬ Р Р…Р Вµ РЎРѓР С•Р Р†Р С—Р В°Р В»"
+                        )
+                    )
+                    streamStorage.deleteTempFile(context.tempPath)
+                    receiverContext = null
+                    binaryChannel.disconnect()
+                    return
+                }
+            }
+            updateState(_state.value?.copy(phase = StreamTransferPhase.Saving))
+            val copyResult = streamStorage.copyTempToTarget(context.tempPath, context.saveTarget)
+            streamStorage.deleteTempFile(context.tempPath)
+            if (copyResult.isSuccess) {
+                webSocketService.completeStreamTransfer(context.transferId)
+                updateState(_state.value?.copy(phase = StreamTransferPhase.Completed))
+            } else {
+                webSocketService.cancelStreamTransfer(context.transferId, "save_failed")
+                updateState(
+                    _state.value?.copy(
+                        phase = StreamTransferPhase.Failed,
+                        message = copyResult.exceptionOrNull()?.message
+                    )
+                )
+            }
+            receiverContext = null
+            binaryChannel.disconnect()
+        }
+    }
+
     private suspend fun handleStreamEvent(event: StreamTransferEvent) {
         when (event) {
             is StreamTransferEvent.Offer -> {
@@ -506,6 +763,7 @@ class StreamTransferController(
                     closeSenderContext()
                     receiverContext?.let { streamStorage.deleteTempFile(it.tempPath) }
                     receiverContext = null
+                    binaryChannel.disconnect()
                     _state.value = null
                     clearError()
                 }
@@ -541,6 +799,7 @@ class StreamTransferController(
                 if (receiverContext?.transferId == transferId) {
                     receiverContext?.let { streamStorage.deleteTempFile(it.tempPath) }
                     receiverContext = null
+                    binaryChannel.disconnect()
                     updateState(
                         _state.value?.copy(
                             phase = StreamTransferPhase.Canceled,
@@ -568,11 +827,12 @@ class StreamTransferController(
                         if (ctx.ackedSeqs.contains(seq)) return@forEach
                         ctx.inFlight.remove(seq)
                         if (ctx.resendSet.add(seq)) {
-                            ctx.resendQueue.add(seq)
+                            ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
                         }
                     }
                     ctx.lastAckAt = System.currentTimeMillis()
                 }
+                updateState(_state.value?.copy(phase = StreamTransferPhase.Transferring))
                 registerCongestion(ctx, max(1, event.data.seqs.size), "nack")
             }
             is StreamTransferEvent.Resume -> {
@@ -583,19 +843,18 @@ class StreamTransferController(
                         if (ctx.ackedSeqs.contains(seq)) return@forEach
                         ctx.inFlight.remove(seq)
                         if (ctx.resendSet.add(seq)) {
-                            ctx.resendQueue.add(seq)
+                            ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
                         }
                     }
                     ctx.lastAckAt = System.currentTimeMillis()
                 }
+                updateState(_state.value?.copy(phase = StreamTransferPhase.Transferring))
                 registerCongestion(ctx, max(1, event.data.missingSeqs.size), "resume")
             }
             is StreamTransferEvent.Ack -> {
                 val ctx = senderContext ?: return
                 if (event.data.transferId != ctx.transferId) return
-                var ackedCount = 0
                 var newAcks = 0
-                var shouldUpdateProgress = false
                 ctx.stateMutex.withLock {
                     event.data.seqs.forEach { seq ->
                         if (ctx.ackedSeqs.add(seq)) {
@@ -604,35 +863,14 @@ class StreamTransferController(
                         }
                         ctx.resendSet.remove(seq)
                     }
-                    ackedCount = ctx.ackedSeqs.size
                     val now = System.currentTimeMillis()
                     ctx.lastAckAt = now
                     if (newAcks > 0) {
                         ctx.acksSinceIncrease += newAcks
                         tryIncreaseWindowLocked(ctx, now)
                     }
-                    if (shouldEmitProgress(
-                            lastChunks = ctx.lastProgressChunks,
-                            currentChunks = ackedCount,
-                            totalChunks = ctx.totalChunks,
-                            lastAt = ctx.lastProgressAt,
-                            now = now
-                        )
-                    ) {
-                        shouldUpdateProgress = true
-                        ctx.lastProgressChunks = ackedCount
-                        ctx.lastProgressAt = now
-                    }
                 }
                 clearError()
-                if (shouldUpdateProgress) {
-                    updateState(_state.value?.copy(transferredChunks = ackedCount))
-                }
-                if (ackedCount >= ctx.totalChunks &&
-                    _state.value?.phase == StreamTransferPhase.Transferring
-                ) {
-                    updateState(_state.value?.copy(phase = StreamTransferPhase.WaitingComplete))
-                }
             }
         }
     }
@@ -660,19 +898,22 @@ class StreamTransferController(
                     lastAcked = ackedCount
                     continue
                 }
+                if (inflight.isEmpty()) {
+                    continue
+                }
                 if (ackedCount < ctx.totalChunks && lastAckAt > 0 && now - lastAckAt > 20_000) {
                     ctx.stateMutex.withLock {
                         inflight.forEach { seq ->
                             if (ctx.ackedSeqs.contains(seq)) return@forEach
                             ctx.inFlight.remove(seq)
                             if (ctx.resendSet.add(seq)) {
-                                ctx.resendQueue.add(seq)
+                                ctx.resendQueues[laneForSeq(seq, ctx.laneCount)].add(seq)
                             }
                         }
                         ctx.lastAckAt = now
                     }
                     registerCongestion(ctx, max(1, inflight.size), "ack_timeout")
-                    emitError(ctx.streamChatId, "Нет подтверждений, пробуем возобновить…")
+                    emitError(ctx.streamChatId, "РќРµС‚ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёР№, РїСЂРѕР±СѓРµРј РІРѕР·РѕР±РЅРѕРІРёС‚СЊвЂ¦")
                 }
             }
         }
@@ -681,15 +922,24 @@ class StreamTransferController(
     private fun startReceiverResumeLoop() {
         scope.launch {
             while (isActive) {
-                delay(5_000)
+                delay(resumeProbeIntervalMs)
                 val ctx = receiverContext ?: continue
                 val current = _state.value
                 if (current == null || current.phase != StreamTransferPhase.Transferring) {
                     continue
                 }
+                if (!ensureBinaryChannelsConnected(
+                        transferId = ctx.transferId,
+                        role = StreamTransferSocketRole.Receiver,
+                        streamChatId = ctx.offer.streamChatId,
+                        laneCount = ctx.laneCount
+                    )
+                ) {
+                    continue
+                }
                 val lastAt = ctx.lastChunkAt
                 val now = System.currentTimeMillis()
-                if (lastAt > 0 && now - lastAt > 5_000) {
+                if (lastAt > 0 && now - lastAt > resumeProbeIntervalMs) {
                     val missing = computeMissingSeqs(ctx)
                     if (missing.isNotEmpty()) {
                         webSocketService.requestStreamTransferResume(ctx.transferId, missing)
@@ -728,9 +978,9 @@ class StreamTransferController(
             else -> ackBatchSize
         }
         val flush = when {
-            gap in 1..10 -> 80L
-            gap in 11..20 -> 100L
-            gap in 21..40 -> 130L
+            gap in 1..10 -> 24L
+            gap in 11..20 -> 40L
+            gap in 21..40 -> 60L
             else -> ackFlushIntervalMs
         }
         context.dynamicAckBatchSize = batch
@@ -796,9 +1046,11 @@ class StreamTransferController(
             val now = System.currentTimeMillis()
             val previousAt = if (ctx.lastTelemetryAt > 0) ctx.lastTelemetryAt else now
             val elapsedMs = (now - previousAt).coerceAtLeast(1L)
+            val sent = ctx.sentChunks
+            val uniqueSent = ctx.sentSeqs.size
             val acked = ctx.ackedSeqs.size
-            val deltaAcked = (acked - ctx.lastTelemetryAckedChunks).coerceAtLeast(0)
-            val bytesPerSec = deltaAcked.toDouble() * ctx.chunkSize.toDouble() * 1000.0 / elapsedMs.toDouble()
+            val deltaSent = (sent - ctx.lastTelemetrySentChunks).coerceAtLeast(0)
+            val bytesPerSec = deltaSent.toDouble() * ctx.chunkSize.toDouble() * 1000.0 / elapsedMs.toDouble()
             val mbPerSec = ((bytesPerSec / (1024.0 * 1024.0)) * 10.0).toInt() / 10.0
             val resendRate = if (ctx.sentChunks > 0) {
                 (ctx.resentChunks.toDouble() * 1000.0 / ctx.sentChunks.toDouble()).toInt() / 10.0
@@ -806,10 +1058,12 @@ class StreamTransferController(
                 0.0
             }
             line = "[STREAM][TX] id=${ctx.transferId} speed=${mbPerSec}MB/s " +
-                "acked=${acked}/${ctx.totalChunks} window=${ctx.adaptiveWindowSize}/${ctx.maxWindowSize} " +
+                "sent=${uniqueSent}/${ctx.totalChunks} acked=${acked}/${ctx.totalChunks} " +
+                "buffer=${effectiveStreamWindowSize * ctx.chunkSize} " +
                 "resendRate=${resendRate}%"
             ctx.lastTelemetryAt = now
             ctx.lastTelemetryAckedChunks = acked
+            ctx.lastTelemetrySentChunks = sent
         }
         line?.let { println(it) }
     }
@@ -880,8 +1134,16 @@ class StreamTransferController(
         val total = context.offer.totalChunks
         if (total <= 0) return emptyList()
         return context.receivedMutex.withLock {
+            val ceiling = when {
+                context.lastChunkReceived -> total - 1
+                context.highestSeqReceived >= 0 -> min(context.highestSeqReceived, total - 1)
+                else -> -1
+            }
+            if (ceiling < 0) {
+                return@withLock emptyList()
+            }
             val missing = ArrayList<Int>(min(maxCount, total))
-            for (seq in 0 until total) {
+            for (seq in 0..ceiling) {
                 if (!context.receivedSeqs.contains(seq)) {
                     missing.add(seq)
                     if (missing.size >= maxCount) break
@@ -899,5 +1161,4 @@ class StreamTransferController(
             phase == StreamTransferPhase.Saving
     }
 }
-
 
