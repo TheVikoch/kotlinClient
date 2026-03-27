@@ -47,17 +47,14 @@ private class JvmStreamFileSource(
 
     override fun readChunk(offset: Long, size: Int): ByteArray {
         if (size <= 0) return ByteArray(0)
+        val fileChannel = ensureChannel() ?: return ByteArray(0)
         val buffer = ByteArray(size)
         var totalRead = 0
-        synchronized(lock) {
-            val fileChannel = ensureChannel() ?: return ByteArray(0)
-            fileChannel.position(offset)
-            val byteBuffer = ByteBuffer.wrap(buffer)
-            while (totalRead < size) {
-                val read = fileChannel.read(byteBuffer)
-                if (read <= 0) break
-                totalRead += read
-            }
+        val byteBuffer = ByteBuffer.wrap(buffer)
+        while (totalRead < size) {
+            val read = fileChannel.read(byteBuffer, offset + totalRead)
+            if (read <= 0) break
+            totalRead += read
         }
         return if (totalRead == size) buffer else buffer.copyOf(totalRead)
     }
@@ -90,10 +87,12 @@ private class JvmStreamFileSource(
     }
 
     private fun ensureChannel(): java.nio.channels.FileChannel? {
-        if (channel != null && raf != null) return channel
-        val opened = RandomAccessFile(file, "r")
-        raf = opened
-        channel = opened.channel
-        return channel
+        synchronized(lock) {
+            if (channel != null && raf != null) return channel
+            val opened = RandomAccessFile(file, "r")
+            raf = opened
+            channel = opened.channel
+            return channel
+        }
     }
 }

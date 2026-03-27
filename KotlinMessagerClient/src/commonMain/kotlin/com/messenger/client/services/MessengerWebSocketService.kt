@@ -32,7 +32,7 @@ expect class MessengerWebSocketService(
     fun acceptStreamTransfer(transferId: String)
     fun rejectStreamTransfer(transferId: String, reason: String? = null)
     fun sendStreamChunk(chunk: StreamTransferChunkDto)
-    fun ackStreamChunks(transferId: String, seqs: List<Int>)
+    fun ackStreamChunks(transferId: String, seqs: List<Int> = emptyList(), ackUpToSeq: Int = -1)
     fun nackStreamChunks(transferId: String, seqs: List<Int>)
     fun requestStreamTransferResume(transferId: String, missingSeqs: List<Int>)
     fun completeStreamTransfer(transferId: String)

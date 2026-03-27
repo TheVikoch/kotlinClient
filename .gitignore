@@ -1,6 +1,8 @@
 # Gradle
 /.gradle/
 /.gradle-local/
+/.gradle-home/
+**/.gradle-home/
 **/.gradle/
 **/.gradle-local/
 **/build/

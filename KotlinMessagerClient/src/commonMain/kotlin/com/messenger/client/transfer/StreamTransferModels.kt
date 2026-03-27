@@ -46,10 +46,9 @@ data class StreamSenderContext(
     val minWindowSize: Int = when {
         windowSize <= 2 -> 1
         windowSize <= 4 -> 2
-        else -> maxOf(4, windowSize / 2)
+        else -> minOf(windowSize, maxOf(senderLaneCount * 2, windowSize / 4, 4))
     },
     val maxWindowSize: Int = maxOf(windowSize, minWindowSize),
-    val readMutex: Mutex = Mutex(),
     val stateMutex: Mutex = Mutex(),
     val inFlight: MutableSet<Int> = mutableSetOf(),
     val sentSeqs: MutableSet<Int> = mutableSetOf(),
@@ -57,12 +56,13 @@ data class StreamSenderContext(
     val resendQueues: MutableList<ArrayDeque<Int>> = MutableList(senderLaneCount) { ArrayDeque<Int>() },
     val resendSet: MutableSet<Int> = mutableSetOf(),
     val nextSeqByLane: MutableList<Int> = MutableList(senderLaneCount) { it },
-    var adaptiveWindowSize: Int = windowSize,
+    var adaptiveWindowSize: Int = minOf(maxWindowSize, maxOf(minWindowSize, senderLaneCount * 4)),
     var acksSinceIncrease: Int = 0,
     var sentChunks: Int = 0,
     var resentChunks: Int = 0,
     var congestionEvents: Int = 0,
     var lastAckAt: Long = 0L,
+    var lastAckedContiguousSeq: Int = -1,
     var lastCongestionAt: Long = 0L,
     var lastWindowAdjustAt: Long = 0L,
     var lastProgressChunks: Int = 0,
@@ -73,24 +73,36 @@ data class StreamSenderContext(
     var lastTelemetrySentChunks: Int = 0
 )
 
+data class StreamReceiverStagedChunk(
+    val buffer: ByteArray,
+    val dataOffset: Int,
+    val dataLength: Int,
+    val isLast: Boolean
+)
+
 data class StreamReceiverContext(
     val transferId: String,
     val offer: StreamTransferOfferDto,
     val tempPath: String,
     val saveTarget: StreamSaveTarget,
     val receiverLaneCount: Int,
-    val receivedSeqs: MutableSet<Int> = mutableSetOf(),
-    val pendingAckSeqs: MutableSet<Int> = mutableSetOf(),
+    val receivedSeqFlags: BooleanArray = BooleanArray(maxOf(1, offer.totalChunks)),
+    val stagedChunks: MutableMap<Int, StreamReceiverStagedChunk> = mutableMapOf(),
     val receivedMutex: Mutex = Mutex(),
+    var receivedCount: Int = 0,
+    var nextDispatchSeq: Int = 0,
+    var highestWrittenSeq: Int = -1,
     var highestSeqReceived: Int = -1,
     var lastChunkReceived: Boolean = false,
     var lastChunkAt: Long = 0L,
     var averageChunkGapMs: Long = 0L,
     var lastAckFlushAt: Long = 0L,
+    var lastAckSentSeq: Int = -1,
     var dynamicAckBatchSize: Int = 16,
     var dynamicAckFlushIntervalMs: Long = 150L,
     var totalAckSent: Int = 0,
     var totalAckBatches: Int = 0,
+    var completionStarted: Boolean = false,
     var lastProgressChunks: Int = 0,
     var lastProgressAt: Long = 0L,
     var startedAt: Long = System.currentTimeMillis(),

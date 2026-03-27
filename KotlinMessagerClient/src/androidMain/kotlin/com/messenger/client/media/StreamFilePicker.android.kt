@@ -107,17 +107,14 @@ private class AndroidStreamFileSource(
 
     override fun readChunk(offset: Long, size: Int): ByteArray {
         if (size <= 0) return ByteArray(0)
+        val fileChannel = ensureCacheChannel() ?: ensureChannel() ?: return ByteArray(0)
         val buffer = ByteArray(size)
         var totalRead = 0
-        synchronized(lock) {
-            val fileChannel = ensureCacheChannel() ?: ensureChannel() ?: return ByteArray(0)
-            fileChannel.position(offset)
-            val byteBuffer = ByteBuffer.wrap(buffer)
-            while (totalRead < size) {
-                val read = fileChannel.read(byteBuffer)
-                if (read <= 0) break
-                totalRead += read
-            }
+        val byteBuffer = ByteBuffer.wrap(buffer)
+        while (totalRead < size) {
+            val read = fileChannel.read(byteBuffer, offset + totalRead)
+            if (read <= 0) break
+            totalRead += read
         }
         return if (totalRead == size) buffer else buffer.copyOf(totalRead)
     }
@@ -189,30 +186,36 @@ private class AndroidStreamFileSource(
     }
 
     private fun ensureChannel(): java.nio.channels.FileChannel? {
-        if (channel != null && pfd != null) return channel
-        if (!ensureDirectAccess()) {
-            return ensureCacheChannel()
+        synchronized(lock) {
+            if (channel != null && pfd != null) return channel
+            if (!ensureDirectAccess()) {
+                return ensureCacheChannel()
+            }
+            val opened = resolver.openFileDescriptor(uri, "r") ?: return ensureCacheChannel()
+            pfd = opened
+            channel = FileInputStream(opened.fileDescriptor).channel
+            return channel
         }
-        val opened = resolver.openFileDescriptor(uri, "r") ?: return ensureCacheChannel()
-        pfd = opened
-        channel = FileInputStream(opened.fileDescriptor).channel
-        return channel
     }
 
     private fun ensureDirectAccess(): Boolean {
-        if (pfd != null || channel != null) return true
-        val opened = resolver.openFileDescriptor(uri, "r") ?: return false
-        pfd = opened
-        channel = FileInputStream(opened.fileDescriptor).channel
-        return true
+        synchronized(lock) {
+            if (pfd != null || channel != null) return true
+            val opened = resolver.openFileDescriptor(uri, "r") ?: return false
+            pfd = opened
+            channel = FileInputStream(opened.fileDescriptor).channel
+            return true
+        }
     }
 
     private fun ensureCacheChannel(): java.nio.channels.FileChannel? {
-        if (cacheRaf != null) return cacheRaf?.channel
-        val file = ensureCacheFile() ?: return null
-        val raf = java.io.RandomAccessFile(file, "r")
-        cacheRaf = raf
-        return raf.channel
+        synchronized(lock) {
+            if (cacheRaf != null) return cacheRaf?.channel
+            val file = ensureCacheFile() ?: return null
+            val raf = java.io.RandomAccessFile(file, "r")
+            cacheRaf = raf
+            return raf.channel
+        }
     }
 
     private fun ensureCacheFile(): File? {

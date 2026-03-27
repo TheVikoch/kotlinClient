@@ -332,7 +332,8 @@ data class StreamTransferChunkDto(
 @Serializable
 data class StreamTransferAckDto(
     val transferId: String = "",
-    val seqs: List<Int> = emptyList()
+    val seqs: List<Int> = emptyList(),
+    val ackUpToSeq: Int = -1
 )
 
 @Serializable

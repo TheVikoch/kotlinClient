@@ -168,9 +168,9 @@ actual class MessengerWebSocketService actual constructor(
         connection?.send("SendStreamChunk", chunk)
     }
 
-    actual fun ackStreamChunks(transferId: String, seqs: List<Int>) {
+    actual fun ackStreamChunks(transferId: String, seqs: List<Int>, ackUpToSeq: Int) {
         if (!_isConnected) return
-        connection?.send("AckStreamChunks", StreamTransferAckDto(transferId, seqs))
+        connection?.send("AckStreamChunks", StreamTransferAckDto(transferId, seqs, ackUpToSeq))
     }
 
     actual fun nackStreamChunks(transferId: String, seqs: List<Int>) {
