@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -75,6 +77,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
@@ -136,6 +139,7 @@ fun ChatDetailScreen(
     var pendingReadMessageId by remember { mutableStateOf<String?>(null) }
     var isCreatingTransferInvite by remember { mutableStateOf(false) }
     var isAcceptingTransferInvite by remember { mutableStateOf(false) }
+    var highlightedMessageId by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
@@ -155,8 +159,15 @@ fun ChatDetailScreen(
         otherText = Color(0xFF1F2937),
         ownMeta = Color.White.copy(alpha = 0.72f),
         otherMeta = Color(0xFF64748B),
-        bubbleBorder = Color(0xFFE2E8F0)
+        bubbleBorder = Color(0xFFE2E8F0),
+        replyAccent = chatAccent
     )
+    val messagesById = remember(messages) { messages.associateBy { it.id } }
+    val messageIndexById = remember(messages) {
+        messages.mapIndexedNotNull { index, message ->
+            message.id.takeIf { it.isNotBlank() }?.let { it to index }
+        }.toMap()
+    }
     val inputBorder = Color(0xFFD1D7E2)
     val inputColors = OutlinedTextFieldDefaults.colors(
         focusedBorderColor = chatAccent,
@@ -386,6 +397,18 @@ fun ChatDetailScreen(
                     errorMessage = error.message ?: "Не удалось отправить сообщение"
                 }
             )
+        }
+    }
+
+    fun scrollToMessage(messageId: String) {
+        val index = messageIndexById[messageId] ?: return
+        scope.launch {
+            highlightedMessageId = messageId
+            listState.animateScrollToItem(maxOf(index - 1, 0))
+            delay(1500)
+            if (highlightedMessageId == messageId) {
+                highlightedMessageId = null
+            }
         }
     }
 
@@ -970,17 +993,27 @@ fun ChatDetailScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(messages) { message ->
+                    items(
+                        items = messages,
+                        key = { message ->
+                            message.id.ifBlank {
+                                "${message.senderId}:${message.sentAt}:${message.content.hashCode()}"
+                            }
+                        }
+                    ) { message ->
                         MessageBubble(
                             message = message,
+                            repliedMessage = message.replyToMessageId?.let(messagesById::get),
+                            isHighlighted = highlightedMessageId == message.id,
                             isOwn = message.senderId == authState.getUserId(),
                             isRead = readMessageIds.contains(message.id),
                             timeLabel = formatTime(message.sentAt),
                             showSenderName = conversationState.type == "group",
                             colors = bubbleColors,
                             onReply = { replyToMessage = it },
+                            onOpenRepliedMessage = ::scrollToMessage,
                             apiService = apiService,
                             token = token,
                             onOpenTransferChannelFromInvite = { inviteToken, transferChannelId ->
@@ -1018,17 +1051,21 @@ fun ChatDetailScreen(
                 )
             ) {
                 Row(
-                    modifier = Modifier.padding(8.dp),
+                    modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Ответ на: ${reply.content.take(50)}",
-                        modifier = Modifier.weight(1f),
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                    ReplyPreviewCard(
+                        title = resolveMessageAuthorLabel(reply),
+                        preview = buildReplyPreviewText(reply),
+                        accentColor = chatAccent,
+                        titleColor = MaterialTheme.colorScheme.onSurface,
+                        previewColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        containerColor = Color.Transparent,
+                        modifier = Modifier.weight(1f)
                     )
                     IconButton(
-                        onClick = { replyToMessage = null }
+                        onClick = { replyToMessage = null },
+                        modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             Icons.Filled.Close,
@@ -1391,8 +1428,127 @@ private data class ChatBubbleColors(
     val otherText: Color,
     val ownMeta: Color,
     val otherMeta: Color,
-    val bubbleBorder: Color
+    val bubbleBorder: Color,
+    val replyAccent: Color
 )
+
+@Composable
+private fun ReplyPreviewCard(
+    title: String,
+    preview: String,
+    accentColor: Color,
+    titleColor: Color,
+    previewColor: Color,
+    containerColor: Color,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(11.dp))
+            .clickable(enabled = onClick != null) {
+                onClick?.invoke()
+            }
+            .background(containerColor)
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .width(2.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(2.dp))
+                .background(accentColor)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Column(
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            Text(
+                text = title,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                color = titleColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = preview,
+                fontSize = 10.sp,
+                color = previewColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun MessageMetaRow(
+    timeLabel: String,
+    isOwn: Boolean,
+    isRead: Boolean,
+    metaColor: Color,
+    alignEnd: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = timeLabel,
+            fontSize = 10.sp,
+            color = metaColor
+        )
+        if (isOwn) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = if (isRead) "✓✓" else "✓",
+                fontSize = 10.sp,
+                color = metaColor
+            )
+        }
+    }
+}
+
+private fun buildReplyPreviewText(message: MessageDto): String {
+    val sanitized = sanitizeInviteMetaLines(message.content)
+        .lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+        .ifBlank {
+            message.attachments.firstOrNull()?.let { buildAttachmentPreviewLabel(it, message.attachments.size) }
+                ?: "Сообщение"
+        }
+    return sanitized.take(52)
+}
+
+private fun buildAttachmentPreviewLabel(
+    attachment: MessageAttachmentDto,
+    totalCount: Int = 1
+): String {
+    val baseLabel = when {
+        attachment.contentType.startsWith("image/", ignoreCase = true) -> "Фото"
+        attachment.contentType.startsWith("video/", ignoreCase = true) -> "Видео"
+        attachment.contentType.startsWith("audio/", ignoreCase = true) -> "Аудио"
+        else -> attachment.fileName.ifBlank { "Файл" }
+    }
+    return if (totalCount > 1) {
+        "$baseLabel и ещё ${totalCount - 1}"
+    } else {
+        baseLabel
+    }
+}
+
+private fun resolveMessageAuthorLabel(message: MessageDto): String {
+    return message.sender.displayName
+        .ifBlank { message.sender.email }
+        .ifBlank { "Сообщение" }
+}
 
 private fun insertEmojiAtCursor(currentValue: TextFieldValue, emoji: String): TextFieldValue {
     val start = minOf(currentValue.selection.start, currentValue.selection.end)
@@ -1531,20 +1687,36 @@ private fun sanitizeInviteMetaLines(content: String): String {
 @Composable
 private fun MessageBubble(
     message: MessageDto,
+    repliedMessage: MessageDto?,
+    isHighlighted: Boolean,
     isOwn: Boolean,
     isRead: Boolean,
     timeLabel: String,
     showSenderName: Boolean,
     colors: ChatBubbleColors,
     onReply: (MessageDto) -> Unit,
+    onOpenRepliedMessage: (String) -> Unit,
     apiService: ApiService,
     token: String?,
     onOpenTransferChannelFromInvite: ((String, String?) -> Unit)?
 ) {
     var hasTriggered by remember { mutableStateOf(false) }
     var dragTotal by remember { mutableStateOf(0f) }
+    val messageText = remember(message.content) { sanitizeInviteMetaLines(message.content) }
+    val inviteToken = remember(message.content) { extractTransferChannelInviteToken(message.content) }
+    val transferChannelId = remember(message.content) { extractTransferChannelId(message.content) }
+    val canOpenTransferInvite = (inviteToken != null || transferChannelId != null) &&
+        onOpenTransferChannelFromInvite != null
+    val replyTargetId = message.replyToMessageId?.ifBlank { null }
+    val replyTitle = repliedMessage?.let(::resolveMessageAuthorLabel) ?: "Ответ на сообщение"
+    val replyPreview = when {
+        repliedMessage != null -> buildReplyPreviewText(repliedMessage)
+        message.replyToMessageId != null -> "Исходное сообщение недоступно"
+        else -> null
+    }
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.78f
+        val inlineMetaReserve = if (isOwn) 46.dp else 34.dp
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = if (isOwn) Arrangement.End else Arrangement.Start
@@ -1580,50 +1752,74 @@ private fun MessageBubble(
                 colors = CardDefaults.cardColors(
                     containerColor = if (isOwn) colors.ownBubble else colors.otherBubble
                 ),
-                border = if (isOwn) null else BorderStroke(1.dp, colors.bubbleBorder),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                border = when {
+                    isHighlighted -> BorderStroke(1.5.dp, colors.replyAccent.copy(alpha = 0.6f))
+                    isOwn -> null
+                    else -> BorderStroke(1.dp, colors.bubbleBorder)
+                },
+                elevation = CardDefaults.cardElevation(defaultElevation = if (isHighlighted) 3.dp else 1.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     if (showSenderName) {
-                        val senderLabel = message.sender.displayName.ifBlank {
-                            message.sender.email
-                        }.ifBlank { "Неизвестно" }
+                        val senderLabel = resolveMessageAuthorLabel(message)
                         Text(
                             text = senderLabel,
                             fontWeight = FontWeight.Medium,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             color = if (isOwn) colors.ownText else colors.otherText
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
                     }
 
-                    if (message.replyToMessageId != null) {
-                        Text(
-                            text = "Ответ",
-                            fontSize = 10.sp,
-                            color = if (isOwn) colors.ownMeta else colors.otherMeta
+                    if (replyPreview != null) {
+                        ReplyPreviewCard(
+                            title = replyTitle,
+                            preview = replyPreview,
+                            accentColor = if (isOwn) Color.White else colors.replyAccent,
+                            titleColor = if (isOwn) Color.White else colors.replyAccent,
+                            previewColor = if (isOwn) Color.White.copy(alpha = 0.84f) else colors.otherText.copy(alpha = 0.72f),
+                            containerColor = if (isOwn) {
+                                Color.White.copy(alpha = 0.08f)
+                            } else {
+                                Color(0xFFF7FAFD)
+                            },
+                            onClick = replyTargetId?.let { targetId ->
+                                { onOpenRepliedMessage(targetId) }
+                            }
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    if (message.content.isNotBlank()) {
-                        val inviteToken = extractTransferChannelInviteToken(message.content)
-                        val transferChannelId = extractTransferChannelId(message.content)
-                        val normalizedContent = sanitizeInviteMetaLines(message.content)
-                        if (normalizedContent.isNotBlank()) {
+                    if (messageText.isNotBlank()) {
+                        if (message.attachments.isEmpty() && !canOpenTransferInvite) {
+                            Box {
+                                Text(
+                                    text = messageText,
+                                    fontSize = 14.sp,
+                                    lineHeight = 18.sp,
+                                    color = if (isOwn) colors.ownText else colors.otherText,
+                                    modifier = Modifier.padding(end = inlineMetaReserve, bottom = 1.dp)
+                                )
+                                MessageMetaRow(
+                                    timeLabel = timeLabel,
+                                    isOwn = isOwn,
+                                    isRead = isRead,
+                                    metaColor = if (isOwn) colors.ownMeta else colors.otherMeta,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(bottom = 1.dp)
+                                )
+                            }
+                        } else {
                             Text(
-                                text = normalizedContent,
+                                text = messageText,
                                 fontSize = 14.sp,
+                                lineHeight = 18.sp,
                                 color = if (isOwn) colors.ownText else colors.otherText
                             )
                         }
-                        if ((inviteToken != null || transferChannelId != null) &&
-                            onOpenTransferChannelFromInvite != null
-                        ) {
-                            Spacer(modifier = Modifier.height(6.dp))
+                        if (canOpenTransferInvite) {
                             TextButton(
                                 onClick = {
                                     onOpenTransferChannelFromInvite(
@@ -1638,7 +1834,6 @@ private fun MessageBubble(
                     }
 
                     if (message.attachments.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(6.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             message.attachments.forEach { attachment ->
                                 AttachmentPreview(
@@ -1652,26 +1847,15 @@ private fun MessageBubble(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = timeLabel,
-                            fontSize = 10.sp,
-                            color = if (isOwn) colors.ownMeta else colors.otherMeta
+                    if (message.attachments.isNotEmpty() || canOpenTransferInvite || messageText.isBlank()) {
+                        MessageMetaRow(
+                            timeLabel = timeLabel,
+                            isOwn = isOwn,
+                            isRead = isRead,
+                            metaColor = if (isOwn) colors.ownMeta else colors.otherMeta,
+                            alignEnd = true,
+                            modifier = Modifier.fillMaxWidth()
                         )
-                        if (isOwn) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isRead) "✓✓" else "✓",
-                                fontSize = 10.sp,
-                                color = colors.ownMeta
-                            )
-                        }
                     }
                 }
             }
