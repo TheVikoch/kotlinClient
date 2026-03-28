@@ -31,3 +31,12 @@ fun buildUserProfilePhotoCacheKey(
     val safePhotoId = photoId.replace(Regex("[^A-Za-z0-9_-]"), "_")
     return "profile_${safeUserId}_$safePhotoId"
 }
+
+fun buildConversationAvatarCacheKey(
+    conversationId: String,
+    photoId: String
+): String {
+    val safeConversationId = conversationId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    val safePhotoId = photoId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    return "conversation_${safeConversationId}_$safePhotoId"
+}

@@ -287,6 +287,75 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         }
     }
 
+    suspend fun initConversationAvatarUpload(
+        token: String,
+        conversationId: String,
+        fileName: String,
+        contentType: String,
+        size: Long
+    ): Result<InitConversationAvatarUploadResponseDto> {
+        return try {
+            val response = client.post("$serverUrl/api/chat/$conversationId/avatar/init") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(
+                    InitConversationAvatarUploadRequestDto(
+                        fileName = fileName,
+                        contentType = contentType,
+                        size = size
+                    )
+                )
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Init conversation avatar upload failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun completeConversationAvatarUpload(
+        token: String,
+        conversationId: String,
+        photoId: String
+    ): Result<ConversationDto> {
+        return try {
+            val response = client.post("$serverUrl/api/chat/$conversationId/avatar/complete") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(CompleteConversationAvatarUploadRequestDto(photoId = photoId))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Complete conversation avatar upload failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getConversationAvatarUrl(
+        token: String,
+        conversationId: String,
+        photoId: String
+    ): Result<MediaUrlResponseDto> {
+        return try {
+            val response = client.get("$serverUrl/api/chat/$conversationId/avatar/$photoId/url") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Get conversation avatar url failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun createStreamInvite(
         token: String,
         personalChatId: String,

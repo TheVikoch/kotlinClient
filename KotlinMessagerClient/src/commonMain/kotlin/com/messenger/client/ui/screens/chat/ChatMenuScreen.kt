@@ -53,15 +53,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.messenger.client.models.ConversationCreatedEventDto
 import com.messenger.client.models.ConversationDto
+import com.messenger.client.models.ConversationMemberDto
 import com.messenger.client.models.MessageAttachmentDto
 import com.messenger.client.models.MessageDto
+import com.messenger.client.models.UserDto
 import com.messenger.client.models.UserSearchResultDto
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
+import com.messenger.client.ui.components.CachedConversationAvatar
 import com.messenger.client.services.MessengerWebSocketService
 import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
+import kotlinx.datetime.Clock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -211,6 +216,20 @@ fun ChatMenuScreen(
         }
     }
 
+    fun refreshUnreadCount(conversationId: String) {
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) return@launch
+            apiService.getUnreadCount(currentToken, conversationId).onSuccess { dto ->
+                unreadCounts = if (dto.count > 0) {
+                    unreadCounts + (conversationId to dto.count)
+                } else {
+                    unreadCounts - conversationId
+                }
+            }
+        }
+    }
+
     fun loadConversations() {
         scope.launch {
             isLoading = true
@@ -248,6 +267,11 @@ fun ChatMenuScreen(
     }
 
     fun upsertConversation(conversation: ConversationDto) {
+        if (conversation.type == "stream") {
+            hiddenStreamConversationIds = hiddenStreamConversationIds + conversation.id
+            return
+        }
+        hiddenStreamConversationIds = hiddenStreamConversationIds - conversation.id
         conversations = sortConversations(
             conversations.filterNot { it.id == conversation.id } + conversation
         )
@@ -258,6 +282,51 @@ fun ChatMenuScreen(
         if (webSocketService.isConnected) {
             webSocketService.joinConversation(conversation.id)
         }
+    }
+
+    fun handleConversationCreated(event: ConversationCreatedEventDto) {
+        val conversation = event.conversation
+        if (conversation.id.isBlank() || conversation.isDeleted) return
+
+        upsertConversation(conversation)
+
+        val preview = conversation.lastMessageContent
+            ?.replace("\n", " ")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        if (preview != null) {
+            lastMessagePreviews = lastMessagePreviews + (conversation.id to preview)
+        }
+
+        typingByConversation = typingByConversation - conversation.id
+
+        val createdByOtherUser = !currentUserId.isNullOrBlank() &&
+            !event.userId.isNullOrBlank() &&
+            event.userId != currentUserId
+        if (createdByOtherUser && !conversation.lastMessageAt.isNullOrBlank()) {
+            unreadCounts = unreadCounts + (conversation.id to maxOf(unreadCounts[conversation.id] ?: 0, 1))
+        }
+
+        refreshUnreadCount(conversation.id)
+    }
+
+    fun buildDraftConversation(result: UserSearchResultDto): ConversationDto {
+        return ConversationDto(
+            id = "draft:${result.id}",
+            type = "personal",
+            createdAt = Clock.System.now().toString(),
+            members = listOf(
+                ConversationMemberDto(
+                    userId = result.id,
+                    user = UserDto(
+                        id = result.id,
+                        displayName = result.displayName,
+                        latestProfilePhotoId = result.latestProfilePhotoId
+                    ),
+                    role = "member"
+                )
+            )
+        )
     }
 
     fun openUserConversation(result: UserSearchResultDto) {
@@ -287,6 +356,13 @@ fun ChatMenuScreen(
                 onOpenChat(existingConversation)
                 return@launch
             }
+
+            openingUserId = null
+            searchQuery = ""
+            userSearchResults = emptyList()
+            userSearchError = null
+            onOpenChat(buildDraftConversation(result))
+            return@launch
 
             val createResult = apiService.createPersonalChat(currentToken, result.displayName)
             createResult.fold(
@@ -383,6 +459,12 @@ fun ChatMenuScreen(
             if (typingByConversation.containsKey(conversationId)) {
                 typingByConversation = typingByConversation - conversationId
             }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        webSocketService.conversationCreated.collect { event ->
+            handleConversationCreated(event)
         }
     }
 
@@ -1198,16 +1280,29 @@ private fun CompactConversationCard(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            CachedUserProfilePhoto(
-                token = token,
-                userId = personalUser?.id.orEmpty(),
-                photoId = personalUser?.latestProfilePhotoId,
-                displayName = conversationTitle,
-                modifier = Modifier.size(52.dp),
-                shape = CircleShape,
-                contentScale = ContentScale.Crop,
-                showLoadingIndicator = false
-            )
+            if (conversation.type == "personal") {
+                CachedUserProfilePhoto(
+                    token = token,
+                    userId = personalUser?.id.orEmpty(),
+                    photoId = personalUser?.latestProfilePhotoId,
+                    displayName = conversationTitle,
+                    modifier = Modifier.size(52.dp),
+                    shape = CircleShape,
+                    contentScale = ContentScale.Crop,
+                    showLoadingIndicator = false
+                )
+            } else {
+                CachedConversationAvatar(
+                    token = token,
+                    conversationId = conversation.id,
+                    photoId = conversation.avatarPhotoId,
+                    title = conversationTitle,
+                    modifier = Modifier.size(52.dp),
+                    shape = CircleShape,
+                    contentScale = ContentScale.Crop,
+                    showLoadingIndicator = false
+                )
+            }
 
             Spacer(modifier = Modifier.size(12.dp))
 

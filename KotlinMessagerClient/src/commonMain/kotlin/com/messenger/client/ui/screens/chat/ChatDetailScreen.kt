@@ -76,6 +76,7 @@ import com.messenger.client.media.rememberMediaCache
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.ui.components.CachedConversationAvatar
 import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
 import kotlinx.coroutines.delay
@@ -91,6 +92,7 @@ fun ChatDetailScreen(
     conversation: ConversationDto,
     webSocketService: MessengerWebSocketService,
     onOpenTransferChannel: (ConversationDto) -> Unit = {},
+    onConversationUpdated: (ConversationDto) -> Unit = {},
     onOpenUserProfile: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -105,12 +107,14 @@ fun ChatDetailScreen(
     var uploadQueue by remember { mutableStateOf<List<PickedFile>>(emptyList()) }
     var isQueueActive by remember { mutableStateOf(false) }
     var showAttachmentPicker by remember { mutableStateOf(false) }
+    var showConversationAvatarPicker by remember { mutableStateOf(false) }
     var unreadCount by remember { mutableStateOf(0) }
     var readMessageIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var typingUsers by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showAddMemberDialog by remember { mutableStateOf(false) }
     var addMemberIdentifier by remember { mutableStateOf("") }
     var isTyping by remember { mutableStateOf(false) }
+    var isConversationAvatarUploading by remember { mutableStateOf(false) }
     var pendingReadMessageId by remember { mutableStateOf<String?>(null) }
     var isCreatingTransferInvite by remember { mutableStateOf(false) }
     var isAcceptingTransferInvite by remember { mutableStateOf(false) }
@@ -121,6 +125,7 @@ fun ChatDetailScreen(
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
+    val isDraftConversation = conversationState.id.startsWith(DraftConversationIdPrefix)
     val listState = rememberLazyListState()
     val chatBackground = Color(0xFFF6F7FB)
     val chatAccent = Color(0xFF4F6FF0)
@@ -175,8 +180,98 @@ fun ChatDetailScreen(
         }
     }
 
+    suspend fun ensureConversationForOutgoingMessage(currentToken: String): ConversationDto? {
+        if (!isDraftConversation) {
+            return conversationState
+        }
+
+        val targetUser = conversationState.members
+            .firstOrNull { it.userId != currentUserId }
+            ?.user
+            ?: conversationState.members.firstOrNull()?.user
+
+        val identifier = targetUser?.displayName
+            ?.ifBlank { targetUser.email.ifBlank { null } }
+            ?: targetUser?.email?.ifBlank { null }
+
+        if (identifier.isNullOrBlank()) {
+            errorMessage = "Не удалось определить собеседника для нового чата"
+            return null
+        }
+
+        val createdConversation = apiService.createPersonalChat(currentToken, identifier).getOrElse { error ->
+            errorMessage = error.message ?: "Не удалось создать чат"
+            return null
+        }
+
+        conversationState = createdConversation
+        onConversationUpdated(createdConversation)
+        return createdConversation
+    }
+
+    fun uploadConversationAvatar(file: PickedFile) {
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                errorMessage = "Нет авторизации"
+                return@launch
+            }
+            if (!file.contentType.startsWith("image/", ignoreCase = true)) {
+                errorMessage = "Для аватара беседы можно выбрать только изображение"
+                return@launch
+            }
+            if (conversationState.type == "personal" || isDraftConversation) {
+                errorMessage = "Аватар можно задать только для групповой беседы или канала"
+                return@launch
+            }
+
+            isConversationAvatarUploading = true
+            errorMessage = null
+
+            val initResponse = apiService.initConversationAvatarUpload(
+                token = currentToken,
+                conversationId = conversationState.id,
+                fileName = file.name,
+                contentType = file.contentType,
+                size = file.bytes.size.toLong()
+            ).getOrElse { error ->
+                isConversationAvatarUploading = false
+                errorMessage = error.message ?: "Не удалось начать загрузку аватара"
+                return@launch
+            }
+
+            val uploadResult = apiService.uploadToPresignedUrl(
+                uploadUrl = initResponse.uploadUrl,
+                bytes = file.bytes,
+                contentType = file.contentType
+            )
+            if (uploadResult.isFailure) {
+                isConversationAvatarUploading = false
+                errorMessage = uploadResult.exceptionOrNull()?.message ?: "Не удалось загрузить аватар"
+                return@launch
+            }
+
+            apiService.completeConversationAvatarUpload(
+                token = currentToken,
+                conversationId = conversationState.id,
+                photoId = initResponse.photoId
+            ).fold(
+                onSuccess = { updatedConversation ->
+                    conversationState = updatedConversation
+                    onConversationUpdated(updatedConversation)
+                    isConversationAvatarUploading = false
+                },
+                onFailure = { error ->
+                    errorMessage = error.message ?: "Не удалось сохранить аватар беседы"
+                    isConversationAvatarUploading = false
+                }
+            )
+        }
+    }
+
     fun loadConversation() {
         scope.launch {
+            if (isDraftConversation) return@launch
             val currentToken = token
             if (currentToken.isNullOrBlank()) return@launch
             val result = apiService.getConversation(currentToken, conversationState.id)
@@ -189,6 +284,10 @@ fun ChatDetailScreen(
 
     fun loadUnreadCount() {
         scope.launch {
+            if (isDraftConversation) {
+                unreadCount = 0
+                return@launch
+            }
             val currentToken = token
             if (!currentToken.isNullOrBlank()) {
                 val result = apiService.getUnreadCount(currentToken, conversationState.id)
@@ -202,6 +301,12 @@ fun ChatDetailScreen(
 
     fun loadMessages() {
         scope.launch {
+            if (isDraftConversation) {
+                messages = emptyList()
+                unreadCount = 0
+                isLoading = false
+                return@launch
+            }
             isLoading = true
             errorMessage = null
             val currentToken = token
@@ -242,9 +347,11 @@ fun ChatDetailScreen(
                 return@launch
             }
 
+            val resolvedConversation = ensureConversationForOutgoingMessage(currentToken) ?: return@launch
+
             val result = apiService.sendMessage(
                 currentToken,
-                conversationState.id,
+                resolvedConversation.id,
                 content,
                 replyToMessageId,
                 pendingAttachments.map { it.id }
@@ -430,6 +537,7 @@ fun ChatDetailScreen(
     }
 
     LaunchedEffect(conversationState.id, token) {
+        if (isDraftConversation) return@LaunchedEffect
         val currentToken = token
         if (currentToken.isNullOrBlank()) return@LaunchedEffect
         var wasConnected = false
@@ -601,6 +709,7 @@ fun ChatDetailScreen(
     }
 
     LaunchedEffect(newMessage) {
+        if (isDraftConversation) return@LaunchedEffect
         val currentText = newMessage
         if (currentText.isBlank()) {
             if (isTyping) {
@@ -644,6 +753,9 @@ fun ChatDetailScreen(
 
     DisposableEffect(conversationState.id) {
         onDispose {
+            if (isDraftConversation) {
+                return@onDispose
+            }
             if (isTyping && webSocketService.isConnected) {
                 webSocketService.sendTypingIndicator(
                     conversationState.id,
@@ -670,6 +782,15 @@ fun ChatDetailScreen(
                 .firstOrNull { it.userId != currentUserId }
                 ?.user
             val canOpenProfile = conversationState.type == "personal" && !personalUser?.id.isNullOrBlank()
+            val canEditConversationAvatar = conversationState.type != "personal" && !isDraftConversation
+            val headerTitle = when (conversationState.type) {
+                "personal" -> {
+                    personalUser?.displayName?.ifBlank { null }
+                        ?: personalUser?.email?.ifBlank { null }
+                        ?: "Чат"
+                }
+                else -> conversationState.name ?: "Чат"
+            }
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -698,17 +819,33 @@ fun ChatDetailScreen(
                         showLoadingIndicator = false
                     )
                     Spacer(modifier = Modifier.width(10.dp))
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .let { baseModifier ->
+                                if (canEditConversationAvatar) {
+                                    baseModifier.clickable { showConversationAvatarPicker = true }
+                                } else {
+                                    baseModifier
+                                }
+                            }
+                    ) {
+                        CachedConversationAvatar(
+                            token = token,
+                            conversationId = conversationState.id,
+                            photoId = conversationState.avatarPhotoId,
+                            title = headerTitle,
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(21.dp),
+                            contentScale = ContentScale.Crop,
+                            showLoadingIndicator = !isConversationAvatarUploading
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
                 }
 
                 Column {
-                    val headerTitle = when (conversationState.type) {
-                        "personal" -> {
-                            personalUser?.displayName?.ifBlank { null }
-                                ?: personalUser?.email?.ifBlank { null }
-                                ?: "Чат"
-                        }
-                        else -> conversationState.name ?: "Чат"
-                    }
                     Text(
                         text = headerTitle,
                         fontWeight = FontWeight.Bold,
@@ -762,7 +899,7 @@ fun ChatDetailScreen(
                 "personal" -> {
                     IconButton(
                         onClick = { inviteToTransferChannel() },
-                        enabled = !isCreatingTransferInvite
+                        enabled = !isCreatingTransferInvite && !isDraftConversation
                     ) {
                         Icon(
                             Icons.Filled.OpenInNew,
@@ -960,7 +1097,13 @@ fun ChatDetailScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
-                    onClick = { showAttachmentPicker = true }
+                    onClick = {
+                        if (isDraftConversation) {
+                            errorMessage = "Сначала отправьте первое сообщение, затем можно добавлять файлы"
+                        } else {
+                            showAttachmentPicker = true
+                        }
+                    }
                 ) {
                     Icon(
                         Icons.Filled.AttachFile,
@@ -1019,6 +1162,24 @@ fun ChatDetailScreen(
         },
         onError = { error ->
             showAttachmentPicker = false
+            errorMessage = error
+        }
+    )
+
+    AttachmentPicker(
+        show = showConversationAvatarPicker,
+        onDismiss = { showConversationAvatarPicker = false },
+        onPicked = { files ->
+            showConversationAvatarPicker = false
+            val avatarFile = files.firstOrNull { it.contentType.startsWith("image/", ignoreCase = true) }
+            if (avatarFile == null) {
+                errorMessage = "Для аватара беседы выберите изображение"
+            } else {
+                uploadConversationAvatar(avatarFile)
+            }
+        },
+        onError = { error ->
+            showConversationAvatarPicker = false
             errorMessage = error
         }
     )
@@ -1100,6 +1261,7 @@ private fun formatFileSize(size: Long): String {
 
 private const val TransferInviteTokenPrefix = "TRANSFER_CHANNEL_INVITE_TOKEN:"
 private const val TransferChannelIdPrefix = "TRANSFER_CHANNEL_ID:"
+private const val DraftConversationIdPrefix = "draft:"
 
 private fun extractTransferChannelInviteToken(content: String): String? {
     val prefixes = listOf(

@@ -4,6 +4,7 @@ import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonElement
+import com.messenger.client.models.ConversationCreatedEventDto
 import com.messenger.client.models.MessageReadEventDto
 import com.messenger.client.models.NewMessageEventDto
 import com.messenger.client.models.StreamTransferAcceptedDto
@@ -44,6 +45,9 @@ actual class MessengerWebSocketService actual constructor(
 
     actual val currentToken: String?
         get() = activeToken
+
+    private val _conversationCreated = MutableSharedFlow<ConversationCreatedEventDto>(extraBufferCapacity = 32)
+    actual val conversationCreated: SharedFlow<ConversationCreatedEventDto> = _conversationCreated
 
     private val _newMessages = MutableSharedFlow<NewMessageEventDto>(extraBufferCapacity = 64)
     actual val newMessages: SharedFlow<NewMessageEventDto> = _newMessages
@@ -233,6 +237,10 @@ actual class MessengerWebSocketService actual constructor(
             _newMessages.tryEmit(data)
         }, NewMessageEventDto::class.java)
 
+        hub.on("ConversationCreated", { data: ConversationCreatedEventDto ->
+            _conversationCreated.tryEmit(data)
+        }, ConversationCreatedEventDto::class.java)
+
         hub.on("MessageRead", { data: MessageReadEventDto ->
             _messageRead.tryEmit(data)
         }, MessageReadEventDto::class.java)
@@ -245,6 +253,14 @@ actual class MessengerWebSocketService actual constructor(
     private fun handleReceiveEvent(eventType: String, eventData: JsonElement) {
         val normalized = eventType.lowercase()
         when (normalized) {
+            "conversation_created" -> {
+                val dto = parseDto(eventData, ConversationCreatedEventDto::class.java) {
+                    it.conversation.id.isNotBlank()
+                }
+                if (dto?.conversation?.id?.isNotBlank() == true) {
+                    _conversationCreated.tryEmit(dto)
+                }
+            }
             "new_message" -> {
                 val dto = gson.fromJson(eventData, NewMessageEventDto::class.java)
                 if (dto != null) _newMessages.tryEmit(dto)
@@ -323,16 +339,27 @@ actual class MessengerWebSocketService actual constructor(
         }
     }
 
+    private fun <T> parseDto(
+        eventData: JsonElement,
+        clazz: Class<T>,
+        isValid: (T) -> Boolean = { true }
+    ): T? {
+        val primary = runCatching { gson.fromJson(eventData, clazz) }.getOrNull()
+        if (primary != null && isValid(primary)) return primary
+        val fallback = runCatching { gsonUpper.fromJson(eventData, clazz) }.getOrNull()
+        return when {
+            fallback != null && isValid(fallback) -> fallback
+            primary != null && isValid(primary) -> primary
+            fallback != null -> fallback
+            else -> primary
+        }
+    }
+
     private fun <T> parseStreamDto(
         eventData: JsonElement,
         clazz: Class<T>,
         idProvider: (T) -> String
-    ): T? {
-        val primary = runCatching { gson.fromJson(eventData, clazz) }.getOrNull()
-        if (primary != null && idProvider(primary).isNotBlank()) return primary
-        val fallback = runCatching { gsonUpper.fromJson(eventData, clazz) }.getOrNull()
-        return if (fallback != null && idProvider(fallback).isNotBlank()) fallback else primary ?: fallback
-    }
+    ): T? = parseDto(eventData, clazz) { idProvider(it).isNotBlank() }
 
     private fun handleReceiveEvent(eventData: JsonElement) {
         val obj = eventData.asJsonObject

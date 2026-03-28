@@ -25,6 +25,7 @@ data class ConversationDto(
     val id: String = "",
     val type: String = "",
     val name: String? = null,
+    val avatarPhotoId: String? = null,
     val createdAt: String = "",
     val lastMessageAt: String? = null,
     val lastMessageContent: String? = null,
@@ -134,6 +135,25 @@ data class CompleteUserProfilePhotoUploadRequestDto(
 )
 
 @Serializable
+data class InitConversationAvatarUploadRequestDto(
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0
+)
+
+@Serializable
+data class InitConversationAvatarUploadResponseDto(
+    val photoId: String = "",
+    val uploadUrl: String = "",
+    val expiresAt: String = ""
+)
+
+@Serializable
+data class CompleteConversationAvatarUploadRequestDto(
+    val photoId: String = ""
+)
+
+@Serializable
 data class SendMessageDto(
     val conversationId: String = "",
     val content: String = "",
@@ -229,6 +249,13 @@ data class SessionDto(
 data class NewMessageEventDto(
     val conversationId: String = "",
     val message: MessageDto = MessageDto()
+)
+
+data class ConversationCreatedEventDto(
+    val type: String = "",
+    val timestamp: String? = null,
+    val userId: String? = null,
+    val conversation: ConversationDto = ConversationDto()
 )
 
 data class MessageReadEventDto(

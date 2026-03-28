@@ -209,6 +209,9 @@ fun MainScreen(authState: AuthState) {
                             currentTransferChannel = transferChannel
                             currentScreen = Screen.TransferChannel(transferChannel)
                         },
+                        onConversationUpdated = { updatedConversation ->
+                            currentConversation = updatedConversation
+                        },
                         onOpenUserProfile = { profileUserId ->
                             currentScreen = Screen.Profile(profileUserId)
                         },
