@@ -5,7 +5,10 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonElement
 import com.messenger.client.models.ConversationCreatedEventDto
+import com.messenger.client.models.ConversationDeletedEventDto
+import com.messenger.client.models.MessageDeletedEventDto
 import com.messenger.client.models.MessageReadEventDto
+import com.messenger.client.models.MessageUpdatedEventDto
 import com.messenger.client.models.NewMessageEventDto
 import com.messenger.client.models.StreamTransferAcceptedDto
 import com.messenger.client.models.StreamTransferAckDto
@@ -49,8 +52,17 @@ actual class MessengerWebSocketService actual constructor(
     private val _conversationCreated = MutableSharedFlow<ConversationCreatedEventDto>(extraBufferCapacity = 32)
     actual val conversationCreated: SharedFlow<ConversationCreatedEventDto> = _conversationCreated
 
+    private val _conversationDeleted = MutableSharedFlow<ConversationDeletedEventDto>(extraBufferCapacity = 32)
+    actual val conversationDeleted: SharedFlow<ConversationDeletedEventDto> = _conversationDeleted
+
     private val _newMessages = MutableSharedFlow<NewMessageEventDto>(extraBufferCapacity = 64)
     actual val newMessages: SharedFlow<NewMessageEventDto> = _newMessages
+
+    private val _messageUpdated = MutableSharedFlow<MessageUpdatedEventDto>(extraBufferCapacity = 64)
+    actual val messageUpdated: SharedFlow<MessageUpdatedEventDto> = _messageUpdated
+
+    private val _messageDeleted = MutableSharedFlow<MessageDeletedEventDto>(extraBufferCapacity = 64)
+    actual val messageDeleted: SharedFlow<MessageDeletedEventDto> = _messageDeleted
 
     private val _messageRead = MutableSharedFlow<MessageReadEventDto>(extraBufferCapacity = 64)
     actual val messageRead: SharedFlow<MessageReadEventDto> = _messageRead
@@ -261,9 +273,27 @@ actual class MessengerWebSocketService actual constructor(
                     _conversationCreated.tryEmit(dto)
                 }
             }
+            "conversation_deleted" -> {
+                val dto = gson.fromJson(eventData, ConversationDeletedEventDto::class.java)
+                if (dto?.conversationId?.isNotBlank() == true) {
+                    _conversationDeleted.tryEmit(dto)
+                }
+            }
             "new_message" -> {
                 val dto = gson.fromJson(eventData, NewMessageEventDto::class.java)
                 if (dto != null) _newMessages.tryEmit(dto)
+            }
+            "message_updated" -> {
+                val dto = gson.fromJson(eventData, MessageUpdatedEventDto::class.java)
+                if (dto?.conversationId?.isNotBlank() == true && dto.message.id.isNotBlank()) {
+                    _messageUpdated.tryEmit(dto)
+                }
+            }
+            "message_deleted" -> {
+                val dto = gson.fromJson(eventData, MessageDeletedEventDto::class.java)
+                if (dto?.conversationId?.isNotBlank() == true && dto.messageId.isNotBlank()) {
+                    _messageDeleted.tryEmit(dto)
+                }
             }
             "message_read" -> {
                 val obj = eventData.asJsonObject

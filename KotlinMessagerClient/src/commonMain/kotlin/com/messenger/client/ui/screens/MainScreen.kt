@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import com.messenger.client.models.ConversationDto
 import com.messenger.client.services.AuthState
+import com.messenger.client.services.ChatAttachmentUploadManager
 import com.messenger.client.services.MessengerWebSocketService
 import com.messenger.client.transfer.StreamTransferController
 import com.messenger.client.ui.screens.auth.LoginScreen
@@ -46,6 +47,7 @@ fun MainScreen(authState: AuthState) {
     var currentTransferChannel by remember { mutableStateOf<ConversationDto?>(null) }
     val scope = rememberCoroutineScope()
     val webSocketService = remember { MessengerWebSocketService() }
+    val chatAttachmentUploadManager = remember { ChatAttachmentUploadManager() }
     val streamStorage = rememberStreamTransferStorage()
     val streamTransferController = remember(webSocketService, streamStorage) {
         StreamTransferController(webSocketService, streamStorage)
@@ -79,6 +81,7 @@ fun MainScreen(authState: AuthState) {
         if (currentToken.isNullOrBlank()) {
             webSocketService.disconnect()
             streamTransferController.resetForLogout()
+            chatAttachmentUploadManager.cancelAll()
             return@LaunchedEffect
         }
         var wasConnected = false
@@ -159,6 +162,7 @@ fun MainScreen(authState: AuthState) {
                         onLogout = {
                             scope.launch {
                                 streamTransferController.resetForLogout()
+                                chatAttachmentUploadManager.cancelAll()
                                 authState.clearAuth()
                                 currentScreen = Screen.Login
                                 showSessions = false
@@ -205,6 +209,7 @@ fun MainScreen(authState: AuthState) {
                         authState = authState,
                         conversation = screen.conversation,
                         webSocketService = webSocketService,
+                        uploadManager = chatAttachmentUploadManager,
                         onOpenTransferChannel = { transferChannel ->
                             currentTransferChannel = transferChannel
                             currentScreen = Screen.TransferChannel(transferChannel)

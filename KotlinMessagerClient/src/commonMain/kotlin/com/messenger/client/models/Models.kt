@@ -43,6 +43,7 @@ data class MessageDto(
     val kind: String = "text",
     val metadataJson: String? = null,
     val sentAt: String = "",
+    val editedAt: String? = null,
     val isDeleted: Boolean = false,
     val replyToMessageId: String? = null,
     val attachments: List<MessageAttachmentDto> = emptyList()
@@ -162,6 +163,11 @@ data class SendMessageDto(
 )
 
 @Serializable
+data class UpdateMessageDto(
+    val content: String = ""
+)
+
+@Serializable
 data class MediaEncryptionMetadataDto(
     val algorithm: String? = null,
     val keyId: String? = null,
@@ -265,6 +271,31 @@ data class MessageReadEventDto(
     val conversationId: String = "",
     val messageId: String = "",
     val readByUserId: String = ""
+)
+
+data class MessageUpdatedEventDto(
+    val type: String = "",
+    val timestamp: String? = null,
+    val userId: String? = null,
+    val conversationId: String = "",
+    val message: MessageDto = MessageDto()
+)
+
+data class MessageDeletedEventDto(
+    val type: String = "",
+    val timestamp: String? = null,
+    val userId: String? = null,
+    val conversationId: String = "",
+    val messageId: String = "",
+    val deletedForEveryone: Boolean = false
+)
+
+data class ConversationDeletedEventDto(
+    val type: String = "",
+    val timestamp: String? = null,
+    val userId: String? = null,
+    val conversationId: String = "",
+    val deletedForEveryone: Boolean = false
 )
 
 data class TypingEventDto(

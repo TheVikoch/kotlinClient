@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
@@ -103,6 +105,8 @@ fun ChatMenuScreen(
     var isUserSearchLoading by remember { mutableStateOf(false) }
     var userSearchError by remember { mutableStateOf<String?>(null) }
     var openingUserId by remember { mutableStateOf<String?>(null) }
+    var selectedConversationForActions by remember { mutableStateOf<ConversationDto?>(null) }
+    var isConversationActionLoading by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
@@ -281,6 +285,32 @@ fun ChatMenuScreen(
         }
         if (webSocketService.isConnected) {
             webSocketService.joinConversation(conversation.id)
+        }
+    }
+
+    fun removeConversationLocally(conversationId: String) {
+        conversations = conversations.filterNot { it.id == conversationId }
+        unreadCounts = unreadCounts - conversationId
+        typingByConversation = typingByConversation - conversationId
+        lastMessagePreviews = lastMessagePreviews - conversationId
+    }
+
+    fun refreshConversationSnapshot(conversationId: String) {
+        scope.launch {
+            val currentToken = token ?: return@launch
+            val refreshed = apiService.getConversation(currentToken, conversationId)
+            refreshed.fold(
+                onSuccess = { conversation ->
+                    if (!conversation.isDeleted) {
+                        upsertConversation(conversation)
+                    } else {
+                        removeConversationLocally(conversationId)
+                    }
+                },
+                onFailure = {
+                    removeConversationLocally(conversationId)
+                }
+            )
         }
     }
 
@@ -465,6 +495,32 @@ fun ChatMenuScreen(
     LaunchedEffect(Unit) {
         webSocketService.conversationCreated.collect { event ->
             handleConversationCreated(event)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        webSocketService.conversationDeleted.collect { event ->
+            if (event.conversationId.isBlank()) return@collect
+            removeConversationLocally(event.conversationId)
+            if (webSocketService.isConnected) {
+                webSocketService.leaveConversation(event.conversationId)
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        webSocketService.messageUpdated.collect { event ->
+            if (event.conversationId.isBlank()) return@collect
+            if (hiddenStreamConversationIds.contains(event.conversationId)) return@collect
+            refreshConversationSnapshot(event.conversationId)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        webSocketService.messageDeleted.collect { event ->
+            if (event.conversationId.isBlank()) return@collect
+            if (hiddenStreamConversationIds.contains(event.conversationId)) return@collect
+            refreshConversationSnapshot(event.conversationId)
         }
     }
 
@@ -735,7 +791,8 @@ fun ChatMenuScreen(
                             hasUnread = hasUnread,
                             typingPrefix = typingPrefix,
                             previewOverride = lastMessagePreviews[conversation.id],
-                            onClick = { onOpenChat(conversation) }
+                            onClick = { onOpenChat(conversation) },
+                            onLongPress = { selectedConversationForActions = conversation }
                         )
                     }
                 }
@@ -895,6 +952,67 @@ fun ChatMenuScreen(
                         }
                     )
                 }
+            }
+        )
+    }
+
+    selectedConversationForActions?.let { conversation ->
+        ConversationActionsDialog(
+            conversation = conversation,
+            isLoading = isConversationActionLoading,
+            onDismiss = {
+                if (!isConversationActionLoading) {
+                    selectedConversationForActions = null
+                }
+            },
+            onDeleteForMe = {
+                scope.launch {
+                    val currentToken = token
+                    if (currentToken.isNullOrBlank()) {
+                        errorMessage = "Нет авторизации"
+                        return@launch
+                    }
+                    isConversationActionLoading = true
+                    val result = apiService.deleteConversationForMe(currentToken, conversation.id)
+                    result.fold(
+                        onSuccess = {
+                            removeConversationLocally(conversation.id)
+                            selectedConversationForActions = null
+                        },
+                        onFailure = { error ->
+                            errorMessage = error.message ?: "Не удалось удалить беседу"
+                        }
+                    )
+                    isConversationActionLoading = false
+                }
+            },
+            onDeleteForEveryone = if (conversation.type == "personal") {
+                {
+                    scope.launch {
+                        val currentToken = token
+                        if (currentToken.isNullOrBlank()) {
+                            errorMessage = "Нет авторизации"
+                            return@launch
+                        }
+                        isConversationActionLoading = true
+                        val result = apiService.deleteConversationForEveryone(currentToken, conversation.id)
+                        result.fold(
+                            onSuccess = {
+                                removeConversationLocally(conversation.id)
+                                if (webSocketService.isConnected) {
+                                    webSocketService.leaveConversation(conversation.id)
+                                }
+                                selectedConversationForActions = null
+                            },
+                            onFailure = { error ->
+                                errorMessage = error.message ?: "Не удалось удалить чат у всех"
+                            }
+                        )
+                        isConversationActionLoading = false
+                    }
+                }
+            } else {
+                null
             }
         )
     }
@@ -1214,6 +1332,7 @@ private fun ConversationCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CompactConversationCard(
     token: String?,
@@ -1223,7 +1342,8 @@ private fun CompactConversationCard(
     hasUnread: Boolean,
     typingPrefix: String?,
     previewOverride: String?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongPress: () -> Unit
 ) {
     fun formatLastTime(value: String?): String? {
         if (value.isNullOrBlank()) return null
@@ -1268,8 +1388,12 @@ private fun CompactConversationCard(
         ?.takeIf { it.isNotBlank() }
 
     Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress
+            ),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         )
@@ -1366,6 +1490,55 @@ private fun CompactConversationCard(
             }
         }
     }
+}
+
+@Composable
+private fun ConversationActionsDialog(
+    conversation: ConversationDto,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onDeleteForMe: () -> Unit,
+    onDeleteForEveryone: (() -> Unit)?
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (conversation.type == "personal") "Удаление чата" else "Удаление беседы"
+            )
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextButton(
+                    onClick = onDeleteForMe,
+                    enabled = !isLoading,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Удалить только у меня")
+                }
+                if (onDeleteForEveryone != null) {
+                    TextButton(
+                        onClick = onDeleteForEveryone,
+                        enabled = !isLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Удалить у всех")
+                    }
+                }
+                if (isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isLoading) {
+                Text("Отмена")
+            }
+        }
+    )
 }
 
 @Composable

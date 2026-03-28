@@ -1,7 +1,10 @@
 package com.messenger.client.services
 
 import com.messenger.client.models.ConversationCreatedEventDto
+import com.messenger.client.models.ConversationDeletedEventDto
+import com.messenger.client.models.MessageDeletedEventDto
 import com.messenger.client.models.MessageReadEventDto
+import com.messenger.client.models.MessageUpdatedEventDto
 import com.messenger.client.models.NewMessageEventDto
 import com.messenger.client.models.StreamTransferEvent
 import com.messenger.client.models.StreamTransferInitRequestDto
@@ -16,7 +19,10 @@ expect class MessengerWebSocketService(
     val serverUrl: String
     val currentToken: String?
     val conversationCreated: SharedFlow<ConversationCreatedEventDto>
+    val conversationDeleted: SharedFlow<ConversationDeletedEventDto>
     val newMessages: SharedFlow<NewMessageEventDto>
+    val messageUpdated: SharedFlow<MessageUpdatedEventDto>
+    val messageDeleted: SharedFlow<MessageDeletedEventDto>
     val messageRead: SharedFlow<MessageReadEventDto>
     val typing: SharedFlow<TypingEventDto>
     val streamEvents: SharedFlow<StreamTransferEvent>

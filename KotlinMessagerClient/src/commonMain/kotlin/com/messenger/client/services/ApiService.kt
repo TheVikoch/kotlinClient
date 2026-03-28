@@ -2,6 +2,7 @@ package com.messenger.client.services
 
 import com.messenger.client.models.*
 import io.ktor.client.call.body
+import io.ktor.client.plugins.onUpload
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -455,6 +456,36 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         }
     }
 
+    suspend fun deleteConversationForMe(token: String, conversationId: String): Result<Unit> {
+        return try {
+            val response = client.delete("$serverUrl/api/chat/$conversationId/me") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(buildApiException(response, "Delete conversation for me failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteConversationForEveryone(token: String, conversationId: String): Result<Unit> {
+        return try {
+            val response = client.delete("$serverUrl/api/chat/$conversationId/everyone") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(buildApiException(response, "Delete conversation for everyone failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun addMemberToGroup(token: String, conversationId: String, identifier: String): Result<ConversationDto> {
         return try {
             val trimmed = identifier.trim()
@@ -512,6 +543,66 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
                 Result.success(response.body())
             } else {
                 Result.failure(Exception("Send message failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateMessage(
+        token: String,
+        conversationId: String,
+        messageId: String,
+        content: String
+    ): Result<MessageDto> {
+        return try {
+            val response = client.put("$serverUrl/api/messages/$conversationId/$messageId") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(UpdateMessageDto(content = content))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Update message failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteMessageForMe(
+        token: String,
+        conversationId: String,
+        messageId: String
+    ): Result<Unit> {
+        return try {
+            val response = client.delete("$serverUrl/api/messages/$conversationId/$messageId/me") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(buildApiException(response, "Delete message for me failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteMessageForEveryone(
+        token: String,
+        conversationId: String,
+        messageId: String
+    ): Result<Unit> {
+        return try {
+            val response = client.delete("$serverUrl/api/messages/$conversationId/$messageId/everyone") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(buildApiException(response, "Delete message for everyone failed"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -618,11 +709,17 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
     suspend fun uploadToPresignedUrl(
         uploadUrl: String,
         bytes: ByteArray,
-        contentType: String
+        contentType: String,
+        onProgress: ((bytesSentTotal: Long, contentLength: Long) -> Unit)? = null
     ): Result<Unit> {
         return try {
             val response = client.put(uploadUrl) {
                 contentType(ContentType.parse(contentType))
+                if (onProgress != null) {
+                    onUpload { bytesSentTotal, contentLength ->
+                        onProgress(bytesSentTotal, contentLength)
+                    }
+                }
                 setBody(bytes)
             }
             if (response.status.isSuccess()) {
