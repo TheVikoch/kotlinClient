@@ -1,6 +1,7 @@
 package com.messenger.client.services
 
 import com.messenger.client.models.AuthResponse
+import com.messenger.client.models.UserProfileDto
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,6 +51,10 @@ class AuthState {
         _currentSessionId.value = null
         _tokenExpires.value = null
         _isLoggedIn.value = false
+    }
+
+    fun updateCurrentUserProfile(profile: UserProfileDto) {
+        _currentUserDisplayName.value = profile.displayName
     }
 
     fun getToken(): String? = _jwtToken.value

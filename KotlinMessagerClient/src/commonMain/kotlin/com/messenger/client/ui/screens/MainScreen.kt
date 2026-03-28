@@ -27,6 +27,7 @@ import com.messenger.client.ui.screens.chat.ChatDetailScreen
 import com.messenger.client.ui.screens.chat.ChatMenuScreen
 import com.messenger.client.ui.screens.chat.TransferChannelScreen
 import com.messenger.client.ui.screens.main.MainMenuScreen
+import com.messenger.client.ui.screens.profile.UserProfileScreen
 import com.messenger.client.ui.screens.sessions.SessionsScreen
 import com.messenger.client.media.rememberStreamTransferStorage
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +67,7 @@ fun MainScreen(authState: AuthState) {
             !isLoggedIn -> if (showRegister) Screen.Register else Screen.Login
             transferChannel != null -> Screen.TransferChannel(transferChannel)
             conversation != null -> Screen.ChatDetail(conversation)
+            currentScreen is Screen.Profile -> currentScreen
             showSessions -> Screen.Sessions
             showChatMenu -> Screen.ChatMenu
             else -> Screen.MainMenu
@@ -185,6 +187,12 @@ fun MainScreen(authState: AuthState) {
                             currentConversation = null
                             currentScreen = Screen.MainMenu
                         },
+                        onOpenProfile = {
+                            val selfUserId = authState.getUserId()
+                            if (!selfUserId.isNullOrBlank()) {
+                                currentScreen = Screen.Profile(selfUserId)
+                            }
+                        },
                         onOpenChat = { conversation ->
                             currentTransferChannel = null
                             currentConversation = conversation
@@ -200,6 +208,9 @@ fun MainScreen(authState: AuthState) {
                         onOpenTransferChannel = { transferChannel ->
                             currentTransferChannel = transferChannel
                             currentScreen = Screen.TransferChannel(transferChannel)
+                        },
+                        onOpenUserProfile = { profileUserId ->
+                            currentScreen = Screen.Profile(profileUserId)
                         },
                         onBack = {
                             currentTransferChannel = null
@@ -227,6 +238,23 @@ fun MainScreen(authState: AuthState) {
                         }
                     )
                 }
+                is Screen.Profile -> {
+                    UserProfileScreen(
+                        authState = authState,
+                        userId = screen.userId,
+                        onBack = {
+                            val transferChannel = currentTransferChannel
+                            val conversation = currentConversation
+                            currentScreen = when {
+                                transferChannel != null -> Screen.TransferChannel(transferChannel)
+                                conversation != null -> Screen.ChatDetail(conversation)
+                                showSessions -> Screen.Sessions
+                                showChatMenu -> Screen.ChatMenu
+                                else -> Screen.MainMenu
+                            }
+                        }
+                    )
+                }
             }
         }
     }
@@ -239,6 +267,7 @@ sealed class Screen {
     object MainMenu : Screen()
     object Sessions : Screen()
     object ChatMenu : Screen()
+    data class Profile(val userId: String) : Screen()
     data class ChatDetail(val conversation: ConversationDto) : Screen()
     data class TransferChannel(val conversation: ConversationDto) : Screen()
 }

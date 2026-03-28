@@ -76,6 +76,7 @@ import com.messenger.client.media.rememberMediaCache
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -90,6 +91,7 @@ fun ChatDetailScreen(
     conversation: ConversationDto,
     webSocketService: MessengerWebSocketService,
     onOpenTransferChannel: (ConversationDto) -> Unit = {},
+    onOpenUserProfile: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
     var conversationState by remember { mutableStateOf(conversation) }
@@ -118,6 +120,7 @@ fun ChatDetailScreen(
     val token by authState.jwtToken.collectAsState()
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
+    val currentUserId by authState.currentUserId.collectAsState()
     val listState = rememberLazyListState()
     val chatBackground = Color(0xFFF6F7FB)
     val chatAccent = Color(0xFF4F6FF0)
@@ -663,7 +666,19 @@ fun ChatDetailScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            val personalUser = conversationState.members
+                .firstOrNull { it.userId != currentUserId }
+                ?.user
+            val canOpenProfile = conversationState.type == "personal" && !personalUser?.id.isNullOrBlank()
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = if (canOpenProfile) {
+                    Modifier.clickable { onOpenUserProfile(personalUser!!.id) }
+                } else {
+                    Modifier
+                }
+            ) {
                 IconButton(onClick = onBack) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBackIos,
@@ -671,14 +686,25 @@ fun ChatDetailScreen(
                     )
                 }
 
+                if (conversationState.type == "personal") {
+                    CachedUserProfilePhoto(
+                        token = token,
+                        userId = personalUser?.id.orEmpty(),
+                        photoId = personalUser?.latestProfilePhotoId,
+                        displayName = personalUser?.displayName ?: "Чат",
+                        modifier = Modifier.size(42.dp),
+                        shape = RoundedCornerShape(21.dp),
+                        contentScale = ContentScale.Crop,
+                        showLoadingIndicator = false
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                }
+
                 Column {
                     val headerTitle = when (conversationState.type) {
                         "personal" -> {
-                            val otherUser = conversationState.members
-                                .firstOrNull { it.userId != authState.getUserId() }
-                                ?.user
-                            otherUser?.displayName?.ifBlank { null }
-                                ?: otherUser?.email?.ifBlank { null }
+                            personalUser?.displayName?.ifBlank { null }
+                                ?: personalUser?.email?.ifBlank { null }
                                 ?: "Чат"
                         }
                         else -> conversationState.name ?: "Чат"
@@ -1332,12 +1358,12 @@ private fun AttachmentPreview(
                 onClick = { showFull = true }
             )
             failed -> Text(
-                text = "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РІРёРґРµРѕ",
+                text = "Не удалось загрузить видео",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
             else -> Text(
-                text = "Р—Р°РіСЂСѓР·РєР° РІРёРґРµРѕ...",
+                text = "Загрузка видео...",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )

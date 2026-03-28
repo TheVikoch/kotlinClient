@@ -7,7 +7,8 @@ import kotlinx.serialization.Serializable
 data class UserDto(
     val id: String = "",
     val email: String = "",
-    val displayName: String = ""
+    val displayName: String = "",
+    val latestProfilePhotoId: String? = null
 )
 
 @Serializable
@@ -79,6 +80,57 @@ data class CreatePersonalChatDto(
 data class CreateGroupChatDto(
     val name: String = "",
     val memberEmails: List<String> = emptyList()
+)
+
+@Serializable
+data class UserSearchResultDto(
+    val id: String = "",
+    val displayName: String = "",
+    val existingConversationId: String? = null,
+    val latestProfilePhotoId: String? = null
+)
+
+@Serializable
+data class UserProfilePhotoDto(
+    val id: String = "",
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0,
+    val createdAt: String = ""
+)
+
+@Serializable
+data class UserProfileDto(
+    val userId: String = "",
+    val displayName: String = "",
+    val aboutMe: String? = null,
+    val latestProfilePhotoId: String? = null,
+    val photos: List<UserProfilePhotoDto> = emptyList()
+)
+
+@Serializable
+data class UpdateUserProfileDto(
+    val displayName: String = "",
+    val aboutMe: String? = null
+)
+
+@Serializable
+data class InitUserProfilePhotoUploadRequestDto(
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0
+)
+
+@Serializable
+data class InitUserProfilePhotoUploadResponseDto(
+    val photoId: String = "",
+    val uploadUrl: String = "",
+    val expiresAt: String = ""
+)
+
+@Serializable
+data class CompleteUserProfilePhotoUploadRequestDto(
+    val photoId: String = ""
 )
 
 @Serializable

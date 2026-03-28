@@ -433,7 +433,7 @@ actual fun AttachmentPicker(
                     },
                     enabled = selected.isNotEmpty()
                 ) {
-                    Text("Отправить")
+                    Text("Готово")
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -920,7 +920,7 @@ private fun BottomActionBar(
                 disabledContentColor = Color.White.copy(alpha = 0.7f)
             )
         ) {
-            Text("Отправить")
+            Text("Готово")
         }
     }
 }

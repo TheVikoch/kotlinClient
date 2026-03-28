@@ -31,4 +31,8 @@ private class FileMediaCache(private val baseDir: File) : MediaCache {
     override fun getPath(key: String): String {
         return File(baseDir, key).absolutePath
     }
+
+    override fun delete(key: String) {
+        File(baseDir, key).delete()
+    }
 }

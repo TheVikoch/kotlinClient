@@ -7,6 +7,7 @@ interface MediaCache {
     fun writeBytes(key: String, bytes: ByteArray)
     fun exists(key: String): Boolean
     fun getPath(key: String): String
+    fun delete(key: String)
 }
 
 @Composable
@@ -20,4 +21,13 @@ fun buildAttachmentCacheKey(
 ): String {
     val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
     return "${conversationId}_${messageId}_${attachmentId}_$safeName"
+}
+
+fun buildUserProfilePhotoCacheKey(
+    userId: String,
+    photoId: String
+): String {
+    val safeUserId = userId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    val safePhotoId = photoId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+    return "profile_${safeUserId}_$safePhotoId"
 }

@@ -47,17 +47,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
 import com.messenger.client.models.MessageAttachmentDto
 import com.messenger.client.models.MessageDto
+import com.messenger.client.models.UserSearchResultDto
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.MessengerWebSocketService
+import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,6 +71,7 @@ fun ChatMenuScreen(
     authState: AuthState,
     webSocketService: MessengerWebSocketService,
     onBack: () -> Unit,
+    onOpenProfile: () -> Unit,
     onOpenChat: (ConversationDto) -> Unit
 ) {
     var conversations by remember { mutableStateOf<List<ConversationDto>>(emptyList()) }
@@ -87,14 +93,41 @@ fun ChatMenuScreen(
     var isStreamInviteLoading by remember { mutableStateOf(false) }
     var acceptInviteError by remember { mutableStateOf<String?>(null) }
     var isAcceptInviteLoading by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var userSearchResults by remember { mutableStateOf<List<UserSearchResultDto>>(emptyList()) }
+    var isUserSearchLoading by remember { mutableStateOf(false) }
+    var userSearchError by remember { mutableStateOf<String?>(null) }
+    var openingUserId by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
     val token by authState.jwtToken.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
     val currentUserEmail by authState.currentUserEmail.collectAsState()
+    val searchTerm = searchQuery.trim()
     val personalChats = remember(conversations) {
         conversations.filter { it.type == "personal" }
+    }
+    val filteredConversations = remember(
+        conversations,
+        searchTerm,
+        currentUserId,
+        currentUserEmail,
+        lastMessagePreviews
+    ) {
+        if (searchTerm.isBlank()) {
+            conversations
+        } else {
+            conversations.filter { conversation ->
+                conversationMatchesSearch(
+                    conversation = conversation,
+                    currentUserId = currentUserId,
+                    currentUserEmail = currentUserEmail,
+                    previewOverride = lastMessagePreviews[conversation.id],
+                    query = searchTerm
+                )
+            }
+        }
     }
 
     fun parseInstantOrNull(value: String?): Instant? {
@@ -214,8 +247,100 @@ fun ChatMenuScreen(
         }
     }
 
+    fun upsertConversation(conversation: ConversationDto) {
+        conversations = sortConversations(
+            conversations.filterNot { it.id == conversation.id } + conversation
+        )
+        unreadCounts = unreadCounts + (conversation.id to (unreadCounts[conversation.id] ?: 0))
+        if (conversation.lastMessageContent.isNullOrBlank()) {
+            fetchMissingPreviews(listOf(conversation))
+        }
+        if (webSocketService.isConnected) {
+            webSocketService.joinConversation(conversation.id)
+        }
+    }
+
+    fun openUserConversation(result: UserSearchResultDto) {
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                errorMessage = "Нет авторизации"
+                return@launch
+            }
+
+            openingUserId = result.id
+            errorMessage = null
+
+            val existingConversation = result.existingConversationId
+                ?.takeIf { it.isNotBlank() }
+                ?.let { conversationId ->
+                    conversations.firstOrNull { it.id == conversationId }
+                        ?: apiService.getConversation(currentToken, conversationId).getOrNull()
+                }
+
+            if (existingConversation != null) {
+                upsertConversation(existingConversation)
+                openingUserId = null
+                searchQuery = ""
+                userSearchResults = emptyList()
+                userSearchError = null
+                onOpenChat(existingConversation)
+                return@launch
+            }
+
+            val createResult = apiService.createPersonalChat(currentToken, result.displayName)
+            createResult.fold(
+                onSuccess = { conversation ->
+                    upsertConversation(conversation)
+                    openingUserId = null
+                    searchQuery = ""
+                    userSearchResults = emptyList()
+                    userSearchError = null
+                    onOpenChat(conversation)
+                },
+                onFailure = { error ->
+                    openingUserId = null
+                    errorMessage = error.message ?: "Не удалось открыть чат"
+                }
+            )
+        }
+    }
+
     LaunchedEffect(Unit) {
         loadConversations()
+    }
+
+    LaunchedEffect(searchTerm, token) {
+        val currentToken = token
+        if (currentToken.isNullOrBlank() || searchTerm.isBlank()) {
+            userSearchResults = emptyList()
+            userSearchError = null
+            isUserSearchLoading = false
+            return@LaunchedEffect
+        }
+
+        if (searchTerm.length < 2) {
+            userSearchResults = emptyList()
+            userSearchError = null
+            isUserSearchLoading = false
+            return@LaunchedEffect
+        }
+
+        isUserSearchLoading = true
+        userSearchError = null
+        delay(250)
+
+        val result = apiService.searchUsers(currentToken, searchTerm)
+        result.fold(
+            onSuccess = { users ->
+                userSearchResults = users
+            },
+            onFailure = { error ->
+                userSearchResults = emptyList()
+                userSearchError = error.message ?: "Не удалось найти пользователей"
+            }
+        )
+        isUserSearchLoading = false
     }
 
     LaunchedEffect(Unit) {
@@ -353,6 +478,13 @@ fun ChatMenuScreen(
                         onDismissRequest = { showOverflowMenu = false }
                     ) {
                         DropdownMenuItem(
+                            text = { Text("Профиль") },
+                            onClick = {
+                                showOverflowMenu = false
+                                onOpenProfile()
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("На главный экран") },
                             onClick = {
                                 showOverflowMenu = false
@@ -363,6 +495,18 @@ fun ChatMenuScreen(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = { Text("Поиск по имени") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+        )
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -395,7 +539,7 @@ fun ChatMenuScreen(
                     )
                 }
             }
-        } else if (conversations.isEmpty()) {
+        } else if (conversations.isEmpty() && searchTerm.isBlank()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -416,31 +560,102 @@ fun ChatMenuScreen(
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(conversations) { conversation ->
-                    val typingNames = typingByConversation[conversation.id]?.values?.toSet().orEmpty()
-                    val typingPrefix = if (typingNames.isNotEmpty()) {
-                        if (conversation.type == "group") {
-                            val names = typingNames.filter { it.isNotBlank() }
-                            val capped = names.take(3)
-                            val base = capped.joinToString(", ")
-                            val label = if (names.size > 3) "$base и др." else base
-                            if (label.isBlank()) "" else "$label "
-                        } else {
-                            ""
-                        }
-                    } else {
-                        null
+                if (searchTerm.isNotBlank()) {
+                    item {
+                        SearchSectionTitle(text = "Пользователи")
                     }
-                    val hasUnread = (unreadCounts[conversation.id] ?: 0) > 0
-                    ConversationCard(
-                        conversation = conversation,
-                        currentUserId = currentUserId,
-                        currentUserEmail = currentUserEmail,
-                        hasUnread = hasUnread,
-                        typingPrefix = typingPrefix,
-                        previewOverride = lastMessagePreviews[conversation.id],
-                        onClick = { onOpenChat(conversation) }
-                    )
+
+                    when {
+                        searchTerm.length < 2 -> {
+                            item {
+                                SearchInfoCard(
+                                    text = "Введите минимум 2 символа для поиска людей."
+                                )
+                            }
+                        }
+                        isUserSearchLoading -> {
+                            item {
+                                SearchLoadingCard()
+                            }
+                        }
+                        userSearchError != null -> {
+                            item {
+                                SearchInfoCard(
+                                    text = userSearchError!!,
+                                    isError = true
+                                )
+                            }
+                        }
+                        userSearchResults.isEmpty() -> {
+                            item {
+                                SearchInfoCard(
+                                    text = "По вашему запросу никого не найдено."
+                                )
+                            }
+                        }
+                        else -> {
+                            items(
+                                items = userSearchResults,
+                                key = { user -> user.id }
+                            ) { user ->
+                                UserSearchResultCard(
+                                    token = token,
+                                    result = user,
+                                    isLoading = openingUserId == user.id,
+                                    onClick = {
+                                        if (openingUserId != user.id) {
+                                            openUserConversation(user)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SearchSectionTitle(text = "Чаты")
+                    }
+                }
+
+                if (filteredConversations.isEmpty()) {
+                    item {
+                        SearchInfoCard(
+                            text = if (searchTerm.isBlank()) {
+                                "Пока нет чатов."
+                            } else {
+                                "Среди текущих чатов совпадений нет."
+                            }
+                        )
+                    }
+                } else {
+                    items(filteredConversations) { conversation ->
+                        val typingNames = typingByConversation[conversation.id]?.values?.toSet().orEmpty()
+                        val typingPrefix = if (typingNames.isNotEmpty()) {
+                            if (conversation.type == "group") {
+                                val names = typingNames.filter { it.isNotBlank() }
+                                val capped = names.take(3)
+                                val base = capped.joinToString(", ")
+                                val label = if (names.size > 3) "$base и др." else base
+                                if (label.isBlank()) "" else "$label "
+                            } else {
+                                ""
+                            }
+                        } else {
+                            null
+                        }
+                        val hasUnread = (unreadCounts[conversation.id] ?: 0) > 0
+                        CompactConversationCard(
+                            token = token,
+                            conversation = conversation,
+                            currentUserId = currentUserId,
+                            currentUserEmail = currentUserEmail,
+                            hasUnread = hasUnread,
+                            typingPrefix = typingPrefix,
+                            previewOverride = lastMessagePreviews[conversation.id],
+                            onClick = { onOpenChat(conversation) }
+                        )
+                    }
                 }
             }
         }
@@ -455,9 +670,10 @@ fun ChatMenuScreen(
                     if (!currentToken.isNullOrBlank()) {
                         val result = apiService.createPersonalChat(currentToken, identifier)
                         result.fold(
-                            onSuccess = {
+                            onSuccess = { conversation ->
                                 showCreatePersonalDialog = false
-                                loadConversations()
+                                upsertConversation(conversation)
+                                onOpenChat(conversation)
                             },
                             onFailure = { error ->
                                 errorMessage = error.message ?: "Не удалось создать чат"
@@ -602,8 +818,184 @@ fun ChatMenuScreen(
     }
 }
 
+private fun resolveConversationTitle(
+    conversation: ConversationDto,
+    currentUserId: String?,
+    currentUserEmail: String?
+): String {
+    return when (conversation.type) {
+        "personal" -> {
+            val otherUser = conversation.members.firstOrNull { it.userId != currentUserId }?.user
+            val byDisplayName = otherUser?.displayName?.ifBlank { null }
+            val byEmail = otherUser?.email?.ifBlank { null }
+            byDisplayName ?: byEmail ?: conversation.name ?: "Чат"
+        }
+        "stream" -> conversation.name ?: "Stream чат"
+        else -> conversation.name ?: "Чат"
+    }
+}
+
+private fun conversationMatchesSearch(
+    conversation: ConversationDto,
+    currentUserId: String?,
+    currentUserEmail: String?,
+    previewOverride: String?,
+    query: String
+): Boolean {
+    val normalizedQuery = query.trim().lowercase()
+    if (normalizedQuery.isBlank()) {
+        return true
+    }
+
+    val searchableText = buildString {
+        append(resolveConversationTitle(conversation, currentUserId, currentUserEmail))
+        append('\n')
+        append(conversation.name.orEmpty())
+        append('\n')
+        append(previewOverride ?: conversation.lastMessageContent.orEmpty())
+
+        conversation.members.forEach { member ->
+            append('\n')
+            append(member.user.displayName)
+            append('\n')
+            append(member.user.email)
+        }
+    }.lowercase()
+
+    return searchableText.contains(normalizedQuery)
+}
+
+@Composable
+private fun SearchSectionTitle(text: String) {
+    Text(
+        text = text,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+        modifier = Modifier.padding(vertical = 4.dp)
+    )
+}
+
+@Composable
+private fun SearchInfoCard(
+    text: String,
+    isError: Boolean = false
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isError) {
+                MaterialTheme.colorScheme.errorContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
+    ) {
+        Text(
+            text = text,
+            color = if (isError) {
+                MaterialTheme.colorScheme.onErrorContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+        )
+    }
+}
+
+@Composable
+private fun SearchLoadingCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            Text(
+                text = "Ищем пользователей...",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun UserSearchResultCard(
+    token: String?,
+    result: UserSearchResultDto,
+    isLoading: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CachedUserProfilePhoto(
+                    token = token,
+                    userId = result.id,
+                    photoId = result.latestProfilePhotoId,
+                    displayName = result.displayName,
+                    modifier = Modifier.size(44.dp),
+                    shape = CircleShape,
+                    contentScale = ContentScale.Crop,
+                    showLoadingIndicator = false
+                )
+
+                Column {
+                    Text(
+                        text = result.displayName.ifBlank { "Без имени" },
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (result.existingConversationId.isNullOrBlank()) {
+                            "Начать новый диалог"
+                        } else {
+                            "Открыть существующий диалог"
+                        },
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                }
+            }
+
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConversationCard(
+    token: String?,
     conversation: ConversationDto,
     currentUserId: String?,
     currentUserEmail: String?,
@@ -643,16 +1035,10 @@ private fun ConversationCard(
     }
 
     val personalTitle = remember(conversation, currentUserId, currentUserEmail) {
-        when (conversation.type) {
-            "personal" -> {
-                val otherUser = conversation.members.firstOrNull { it.userId != currentUserId }?.user
-                val byDisplayName = otherUser?.displayName?.ifBlank { null }
-                val byEmail = otherUser?.email?.ifBlank { null }
-                byDisplayName ?: byEmail ?: conversation.name
-            }
-            "stream" -> conversation.name ?: "Stream чат"
-            else -> conversation.name
-        }
+        resolveConversationTitle(conversation, currentUserId, currentUserEmail)
+    }
+    val personalUser = remember(conversation, currentUserId) {
+        conversation.members.firstOrNull { it.userId != currentUserId }?.user
     }
 
     Card(
@@ -665,17 +1051,44 @@ private fun ConversationCard(
         Column(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
+            val preview = (previewOverride ?: conversation.lastMessageContent)
+                ?.replace("\n", " ")
+                ?.trim()
+                ?.let { text ->
+                    if (text.length > 32) {
+                        text.take(29) + "..."
+                    } else {
+                        text
+                    }
+                }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = personalTitle ?: "Без названия",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CachedUserProfilePhoto(
+                        token = token,
+                        userId = personalUser?.id.orEmpty(),
+                        photoId = personalUser?.latestProfilePhotoId,
+                        displayName = personalTitle ?: "Без названия",
+                        modifier = Modifier.size(44.dp),
+                        shape = CircleShape,
+                        contentScale = ContentScale.Crop,
+                        showLoadingIndicator = false
+                    )
+                    Text(
+                        text = personalTitle ?: "Без названия",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -697,16 +1110,6 @@ private fun ConversationCard(
                 }
             }
 
-    val preview = (previewOverride ?: conversation.lastMessageContent)
-        ?.replace("\n", " ")
-        ?.trim()
-        ?.let { text ->
-            if (text.length > 16) {
-                        text.take(13) + "..."
-                    } else {
-                        text
-                    }
-                }
             if (!preview.isNullOrBlank() || typingPrefix != null) {
                 Spacer(modifier = Modifier.height(4.dp))
                 if (typingPrefix != null) {
@@ -722,6 +1125,147 @@ private fun ConversationCard(
                         text = preview,
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactConversationCard(
+    token: String?,
+    conversation: ConversationDto,
+    currentUserId: String?,
+    currentUserEmail: String?,
+    hasUnread: Boolean,
+    typingPrefix: String?,
+    previewOverride: String?,
+    onClick: () -> Unit
+) {
+    fun formatLastTime(value: String?): String? {
+        if (value.isNullOrBlank()) return null
+        val instant = runCatching { Instant.parse(value) }.getOrNull() ?: return value
+        val now = kotlinx.datetime.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date
+        val time = instant.toLocalDateTime(TimeZone.currentSystemDefault())
+        return if (time.date == now) {
+            val hour = time.hour.toString().padStart(2, '0')
+            val minute = time.minute.toString().padStart(2, '0')
+            "$hour:$minute"
+        } else {
+            val day = time.dayOfMonth
+            val month = when (time.monthNumber) {
+                1 -> "января"
+                2 -> "февраля"
+                3 -> "марта"
+                4 -> "апреля"
+                5 -> "мая"
+                6 -> "июня"
+                7 -> "июля"
+                8 -> "августа"
+                9 -> "сентября"
+                10 -> "октября"
+                11 -> "ноября"
+                12 -> "декабря"
+                else -> ""
+            }
+            "$day $month"
+        }
+    }
+
+    val personalTitle = remember(conversation, currentUserId, currentUserEmail) {
+        resolveConversationTitle(conversation, currentUserId, currentUserEmail)
+    }
+    val personalUser = remember(conversation, currentUserId) {
+        conversation.members.firstOrNull { it.userId != currentUserId }?.user
+    }
+    val conversationTitle = personalTitle.ifBlank { "Без названия" }
+    val preview = (previewOverride ?: conversation.lastMessageContent)
+        ?.replace("\n", " ")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CachedUserProfilePhoto(
+                token = token,
+                userId = personalUser?.id.orEmpty(),
+                photoId = personalUser?.latestProfilePhotoId,
+                displayName = conversationTitle,
+                modifier = Modifier.size(52.dp),
+                shape = CircleShape,
+                contentScale = ContentScale.Crop,
+                showLoadingIndicator = false
+            )
+
+            Spacer(modifier = Modifier.size(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = conversationTitle,
+                        modifier = Modifier.weight(1f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        formatLastTime(conversation.lastMessageAt)?.let { lastTime ->
+                            Text(
+                                text = lastTime,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                        if (hasUnread) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+                            )
+                        }
+                    }
+                }
+
+                if (typingPrefix != null) {
+                    TypingIndicatorText(
+                        prefix = typingPrefix,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            color = MaterialTheme.colorScheme.primary,
+                            fontStyle = FontStyle.Italic
+                        )
+                    )
+                } else if (!preview.isNullOrBlank()) {
+                    Text(
+                        text = preview,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -846,5 +1390,5 @@ private fun resolvePersonalChatTitle(
     currentUserId: String?,
     currentUserEmail: String?
 ): String {
-    return conversation.name ?: "Чат"
+    return resolveConversationTitle(conversation, currentUserId, currentUserEmail)
 }

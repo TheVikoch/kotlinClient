@@ -8,10 +8,16 @@ import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.isSuccess
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class ApiService(private val serverUrl: String = defaultServerUrl) {
     private val client = createHttpClient()
@@ -117,6 +123,164 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
                 Result.success(response.body())
             } else {
                 Result.failure(Exception("Create group chat failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchUsers(token: String, query: String, limit: Int = 10): Result<List<UserSearchResultDto>> {
+        return try {
+            val trimmed = query.trim()
+            if (trimmed.isBlank()) {
+                Result.success(emptyList())
+            } else {
+                val response = client.get(
+                    "$serverUrl/api/chat/users/search?query=${trimmed.encodeURLParameter()}&limit=$limit"
+                ) {
+                    header("Authorization", "Bearer $token")
+                }
+                if (response.status.isSuccess()) {
+                    Result.success(response.body())
+                } else {
+                    Result.failure(buildApiException(response, "Search users failed"))
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getMyProfile(token: String): Result<UserProfileDto> {
+        return try {
+            val response = client.get("$serverUrl/api/profile/me") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Get profile failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getUserProfile(token: String, userId: String): Result<UserProfileDto> {
+        return try {
+            val response = client.get("$serverUrl/api/profile/$userId") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Get profile failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateMyProfile(
+        token: String,
+        displayName: String,
+        aboutMe: String?
+    ): Result<UserProfileDto> {
+        return try {
+            val response = client.put("$serverUrl/api/profile/me") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(UpdateUserProfileDto(displayName = displayName, aboutMe = aboutMe))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Update profile failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun initUserProfilePhotoUpload(
+        token: String,
+        fileName: String,
+        contentType: String,
+        size: Long
+    ): Result<InitUserProfilePhotoUploadResponseDto> {
+        return try {
+            val response = client.post("$serverUrl/api/profile/me/photos/init") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(
+                    InitUserProfilePhotoUploadRequestDto(
+                        fileName = fileName,
+                        contentType = contentType,
+                        size = size
+                    )
+                )
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Init profile photo upload failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun completeUserProfilePhotoUpload(
+        token: String,
+        photoId: String
+    ): Result<UserProfileDto> {
+        return try {
+            val response = client.post("$serverUrl/api/profile/me/photos/complete") {
+                contentType(ContentType.Application.Json)
+                header("Authorization", "Bearer $token")
+                setBody(CompleteUserProfilePhotoUploadRequestDto(photoId = photoId))
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Complete profile photo upload failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteUserProfilePhoto(
+        token: String,
+        photoId: String
+    ): Result<UserProfileDto> {
+        return try {
+            val response = client.delete("$serverUrl/api/profile/me/photos/$photoId") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Delete profile photo failed"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getUserProfilePhotoUrl(
+        token: String,
+        userId: String,
+        photoId: String
+    ): Result<MediaUrlResponseDto> {
+        return try {
+            val response = client.get("$serverUrl/api/profile/$userId/photos/$photoId/url") {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(buildApiException(response, "Get profile photo url failed"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -429,5 +593,17 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private suspend fun buildApiException(response: HttpResponse, fallback: String): Exception {
+        val raw = runCatching { response.bodyAsText() }.getOrDefault("")
+        val message = runCatching {
+            Json.parseToJsonElement(raw)
+                .jsonObject["message"]
+                ?.jsonPrimitive
+                ?.contentOrNull
+        }.getOrNull()
+
+        return Exception(message?.takeIf { it.isNotBlank() } ?: "$fallback: ${response.status}")
     }
 }
