@@ -1,9 +1,17 @@
 ﻿package com.messenger.client.ui.screens.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -19,6 +27,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
@@ -29,6 +40,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.outlined.InsertEmoticon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -55,10 +67,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
@@ -100,7 +116,7 @@ fun ChatDetailScreen(
     var messages by remember { mutableStateOf<List<MessageDto>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var newMessage by remember { mutableStateOf("") }
+    var newMessage by remember { mutableStateOf(TextFieldValue("")) }
     var replyToMessage by remember { mutableStateOf<MessageDto?>(null) }
     var pendingAttachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     var isUploading by remember { mutableStateOf(false) }
@@ -108,6 +124,8 @@ fun ChatDetailScreen(
     var isQueueActive by remember { mutableStateOf(false) }
     var showAttachmentPicker by remember { mutableStateOf(false) }
     var showConversationAvatarPicker by remember { mutableStateOf(false) }
+    var showEmojiPicker by remember { mutableStateOf(false) }
+    var selectedEmojiCategoryId by remember { mutableStateOf(EmojiCategories.first().id) }
     var unreadCount by remember { mutableStateOf(0) }
     var readMessageIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var typingUsers by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -125,6 +143,7 @@ fun ChatDetailScreen(
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
+    val focusManager = LocalFocusManager.current
     val isDraftConversation = conversationState.id.startsWith(DraftConversationIdPrefix)
     val listState = rememberLazyListState()
     val chatBackground = Color(0xFFF6F7FB)
@@ -359,7 +378,7 @@ fun ChatDetailScreen(
             result.fold(
                 onSuccess = { message ->
                     messages = normalizeMessages(messages + message)
-                    newMessage = ""
+                    newMessage = TextFieldValue("")
                     replyToMessage = null
                     pendingAttachments = emptyList()
                 },
@@ -650,6 +669,10 @@ fun ChatDetailScreen(
         pendingAttachments = pendingAttachments.filterNot { it.id == id }
     }
 
+    fun insertEmoji(emoji: String) {
+        newMessage = insertEmojiAtCursor(newMessage, emoji)
+    }
+
     LaunchedEffect(conversationState.id) {
         webSocketService.newMessages.collect { event ->
             if (event.conversationId == conversationState.id) {
@@ -708,9 +731,9 @@ fun ChatDetailScreen(
         }
     }
 
-    LaunchedEffect(newMessage) {
+    LaunchedEffect(newMessage.text) {
         if (isDraftConversation) return@LaunchedEffect
-        val currentText = newMessage
+        val currentText = newMessage.text
         if (currentText.isBlank()) {
             if (isTyping) {
                 isTyping = false
@@ -737,7 +760,7 @@ fun ChatDetailScreen(
         }
 
         delay(5000)
-        if (newMessage == currentText && newMessage.isNotBlank()) {
+        if (newMessage.text == currentText && currentText.isNotBlank()) {
             if (isTyping) {
                 isTyping = false
                 if (webSocketService.isConnected) {
@@ -1084,6 +1107,18 @@ fun ChatDetailScreen(
             }
         }
 
+        AnimatedVisibility(
+            visible = showEmojiPicker,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            EmojiPickerPanel(
+                selectedCategoryId = selectedEmojiCategoryId,
+                onCategorySelected = { selectedEmojiCategoryId = it },
+                onEmojiSelected = { emoji -> insertEmoji(emoji) }
+            )
+        }
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -1110,13 +1145,34 @@ fun ChatDetailScreen(
                         contentDescription = "Прикрепить файл"
                     )
                 }
+                IconButton(
+                    onClick = {
+                        showEmojiPicker = !showEmojiPicker
+                        if (showEmojiPicker) {
+                            focusManager.clearFocus(force = true)
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.InsertEmoticon,
+                        contentDescription = "Открыть эмоджи",
+                        tint = Color.Black,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
                 OutlinedTextField(
                     value = newMessage,
                     onValueChange = { value ->
                         newMessage = value
                     },
                     label = { Text("Сообщение") },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                showEmojiPicker = false
+                            }
+                        },
                     maxLines = 4,
                     colors = inputColors
                 )
@@ -1125,11 +1181,11 @@ fun ChatDetailScreen(
 
                 Button(
                     onClick = {
-                        if (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) {
-                            sendMessage(newMessage, replyToMessage?.id)
+                        if (newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                            sendMessage(newMessage.text, replyToMessage?.id)
                         }
                     },
-                    enabled = (newMessage.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading && !isUploading,
+                    enabled = (newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading && !isUploading,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = chatAccent,
                         contentColor = Color.White,
@@ -1239,6 +1295,95 @@ private data class PendingAttachment(
     val previewBytes: ByteArray?
 )
 
+private data class EmojiCategory(
+    val id: String,
+    val icon: String,
+    val emojis: List<String>
+)
+
+@Composable
+private fun EmojiPickerPanel(
+    selectedCategoryId: String,
+    onCategorySelected: (String) -> Unit,
+    onEmojiSelected: (String) -> Unit
+) {
+    val selectedCategory = EmojiCategories.firstOrNull { it.id == selectedCategoryId } ?: EmojiCategories.first()
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(24.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                EmojiCategories.forEach { category ->
+                    val isSelected = category.id == selectedCategory.id
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isSelected) {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            )
+                            .clickable { onCategorySelected(category.id) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = category.icon,
+                            fontSize = 20.sp
+                        )
+                    }
+                }
+            }
+
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(8),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 236.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(selectedCategory.emojis) { emoji ->
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.52f))
+                            .clickable { onEmojiSelected(emoji) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = emoji,
+                            fontSize = 24.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 private data class ChatBubbleColors(
     val ownBubble: Color,
     val otherBubble: Color,
@@ -1248,6 +1393,21 @@ private data class ChatBubbleColors(
     val otherMeta: Color,
     val bubbleBorder: Color
 )
+
+private fun insertEmojiAtCursor(currentValue: TextFieldValue, emoji: String): TextFieldValue {
+    val start = minOf(currentValue.selection.start, currentValue.selection.end)
+    val end = maxOf(currentValue.selection.start, currentValue.selection.end)
+    val updatedText = buildString {
+        append(currentValue.text.substring(0, start))
+        append(emoji)
+        append(currentValue.text.substring(end))
+    }
+    val newCursor = start + emoji.length
+    return TextFieldValue(
+        text = updatedText,
+        selection = TextRange(newCursor)
+    )
+}
 
 private fun formatFileSize(size: Long): String {
     val kb = 1024.0
@@ -1262,6 +1422,69 @@ private fun formatFileSize(size: Long): String {
 private const val TransferInviteTokenPrefix = "TRANSFER_CHANNEL_INVITE_TOKEN:"
 private const val TransferChannelIdPrefix = "TRANSFER_CHANNEL_ID:"
 private const val DraftConversationIdPrefix = "draft:"
+
+private val EmojiCategories = listOf(
+    EmojiCategory(
+        id = "faces",
+        icon = "😀",
+        emojis = listOf(
+            "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "🥰",
+            "😎", "🤩", "🥳", "🤗", "🙂", "🙃", "😉", "😌",
+            "😇", "🥺", "😏", "🤔", "🫠", "🤭", "🤫", "🤝",
+            "😴", "🤤", "😤", "😭", "😡", "🥶", "🥵", "😱"
+        )
+    ),
+    EmojiCategory(
+        id = "gestures",
+        icon = "👍",
+        emojis = listOf(
+            "👍", "👎", "👏", "🙌", "🫶", "🤝", "👋", "✌️",
+            "🤞", "🤟", "👌", "🤌", "🙏", "💪", "🫡", "👀",
+            "🫣", "🫠", "💯", "🔥", "❤️", "🩵", "💚", "💛",
+            "💜", "🤍", "🖤", "💔", "✨", "🎉", "🎊", "💥"
+        )
+    ),
+    EmojiCategory(
+        id = "nature",
+        icon = "🐻",
+        emojis = listOf(
+            "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼",
+            "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔",
+            "🐧", "🐦", "🦄", "🐝", "🦋", "🌸", "🌹", "🌻",
+            "🌿", "🍀", "🌵", "🌙", "⭐", "☀️", "🌈", "❄️"
+        )
+    ),
+    EmojiCategory(
+        id = "food",
+        icon = "🍕",
+        emojis = listOf(
+            "🍏", "🍎", "🍐", "🍊", "🍋", "🍉", "🍇", "🍓",
+            "🫐", "🍒", "🥝", "🍍", "🥥", "🥑", "🍅", "🥕",
+            "🌮", "🍕", "🍔", "🍟", "🍜", "🍣", "🍩", "🍪",
+            "🍫", "🍿", "🧋", "☕", "🍵", "🥤", "🍷", "🍰"
+        )
+    ),
+    EmojiCategory(
+        id = "activity",
+        icon = "⚽",
+        emojis = listOf(
+            "⚽", "🏀", "🏐", "🎾", "🏓", "🏸", "🥊", "🎯",
+            "🎮", "🕹️", "🎲", "🧩", "🎸", "🎹", "🎤", "🎧",
+            "🎬", "📷", "🎨", "🚴", "🏂", "🏋️", "🧘", "🎻",
+            "🛹", "🏄", "🥇", "🏆", "🎪", "🎟️", "🎬", "🎼"
+        )
+    ),
+    EmojiCategory(
+        id = "travel",
+        icon = "🚗",
+        emojis = listOf(
+            "🚗", "🚕", "🚌", "🚎", "🏎️", "🚓", "🚑", "🚒",
+            "🚚", "🚲", "🛵", "🏍️", "✈️", "🛫", "🛬", "🚀",
+            "🚁", "⛵", "🚤", "🛳️", "🏝️", "🏖️", "🏙️", "🌆",
+            "🌃", "🏠", "🏡", "🏢", "🏰", "🗽", "🗼", "🧭"
+        )
+    )
+)
 
 private fun extractTransferChannelInviteToken(content: String): String? {
     val prefixes = listOf(
