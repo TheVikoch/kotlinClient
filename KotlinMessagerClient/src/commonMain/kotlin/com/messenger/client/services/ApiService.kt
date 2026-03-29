@@ -632,6 +632,29 @@ class ApiService(private val serverUrl: String = defaultServerUrl) {
         }
     }
 
+    suspend fun getConversationAttachments(
+        token: String,
+        conversationId: String,
+        limit: Int = 100,
+        cursor: String? = null
+    ): Result<ConversationAttachmentsResponseDto> {
+        return try {
+            var url = "$serverUrl/api/messages/$conversationId/attachments?limit=$limit"
+            cursor?.let { url += "&cursor=${it.encodeURLParameter()}" }
+
+            val response = client.get(url) {
+                header("Authorization", "Bearer $token")
+            }
+            if (response.status.isSuccess()) {
+                Result.success(response.body())
+            } else {
+                Result.failure(Exception("Get conversation attachments failed: ${response.status}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun getUnreadCount(token: String, conversationId: String): Result<UnreadCountDto> {
         return try {
             val response = client.get("$serverUrl/api/messages/$conversationId/unread-count") {

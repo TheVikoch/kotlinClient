@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,8 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -94,6 +91,16 @@ fun UserProfileScreen(
         if (isCurrentUser) {
             authState.updateCurrentUserProfile(newProfile)
         }
+    }
+
+    fun hasUnsavedProfileChanges(): Boolean {
+        if (!isCurrentUser) {
+            return false
+        }
+
+        val currentProfile = profile ?: return false
+        return currentProfile.displayName != displayName ||
+            currentProfile.aboutMe.orEmpty() != aboutMe.ifBlank { "" }
     }
 
     fun loadProfile() {
@@ -180,7 +187,7 @@ fun UserProfileScreen(
         isUploading = false
     }
 
-    fun saveProfile() {
+    fun saveProfile(onSuccess: (() -> Unit)? = null) {
         scope.launch {
             val currentToken = token
             if (currentToken.isNullOrBlank()) {
@@ -198,6 +205,7 @@ fun UserProfileScreen(
                 onSuccess = { updatedProfile ->
                     applyProfile(updatedProfile)
                     isSaving = false
+                    onSuccess?.invoke()
                 },
                 onFailure = { error ->
                     errorMessage = error.message ?: "Не удалось сохранить профиль"
@@ -205,6 +213,19 @@ fun UserProfileScreen(
                 }
             )
         }
+    }
+
+    fun navigateBack() {
+        if (isSaving || isUploading) {
+            return
+        }
+
+        if (!hasUnsavedProfileChanges()) {
+            onBack()
+            return
+        }
+
+        saveProfile(onSuccess = onBack)
     }
 
     fun deleteSelectedPhoto() {
@@ -265,7 +286,10 @@ fun UserProfileScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
+                IconButton(
+                    onClick = ::navigateBack,
+                    enabled = !isSaving && !isUploading
+                ) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBackIos,
                         contentDescription = "Назад"
@@ -288,20 +312,11 @@ fun UserProfileScreen(
                 }
             }
 
-            if (isCurrentUser) {
-                Button(
-                    onClick = ::saveProfile,
-                    enabled = !isSaving && !isUploading
-                ) {
-                    if (isSaving) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Text("Сохранить")
-                    }
-                }
+            if (isSaving) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
             }
         }
 
@@ -443,20 +458,22 @@ fun UserProfileScreen(
                         }
 
                         if (isCurrentUser && selectedPhoto != null) {
-                            Button(
-                                onClick = ::deleteSelectedPhoto,
-                                enabled = !isSaving && !isUploading,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.error
-                                )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
                             ) {
-                                Icon(
-                                    Icons.Filled.Delete,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.size(8.dp))
-                                Text("Удалить выбранное фото")
+                                IconButton(
+                                    onClick = ::deleteSelectedPhoto,
+                                    enabled = !isSaving && !isUploading,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Delete,
+                                        contentDescription = "Удалить выбранное фото",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
 

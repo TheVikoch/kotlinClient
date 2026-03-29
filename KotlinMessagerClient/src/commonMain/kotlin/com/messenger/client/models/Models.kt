@@ -57,6 +57,22 @@ data class MessagesResponseDto(
 )
 
 @Serializable
+data class ConversationAttachmentEntryDto(
+    val conversationId: String = "",
+    val messageId: String = "",
+    val senderLabel: String = "",
+    val sentAt: String = "",
+    val attachment: MessageAttachmentDto = MessageAttachmentDto()
+)
+
+@Serializable
+data class ConversationAttachmentsResponseDto(
+    val attachments: List<ConversationAttachmentEntryDto> = emptyList(),
+    val hasMore: Boolean = false,
+    val nextCursor: String? = null
+)
+
+@Serializable
 data class UnreadCountDto(
     val count: Int = 0
 )

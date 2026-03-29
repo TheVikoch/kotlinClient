@@ -78,13 +78,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -100,6 +103,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.messenger.client.models.ConversationDto
+import com.messenger.client.models.ConversationAttachmentEntryDto
 import com.messenger.client.models.MessageAttachmentDto
 import com.messenger.client.models.MessageDto
 import com.messenger.client.media.FullScreenVideo
@@ -113,11 +117,17 @@ import com.messenger.client.media.rememberFileOpener
 import com.messenger.client.media.rememberMediaCache
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
+import com.messenger.client.services.ChatMessagesWarmCacheDurationMs
+import com.messenger.client.services.ChatMessagesCacheEntry
 import com.messenger.client.services.ChatAttachmentUploadManager
 import com.messenger.client.services.MessengerWebSocketService
 import com.messenger.client.services.OutgoingAttachmentDraft
 import com.messenger.client.services.OutgoingMessageUploadStage
 import com.messenger.client.services.OutgoingMessageUploadTask
+import com.messenger.client.services.buildChatMessagesCacheEntry
+import com.messenger.client.services.buildChatMessagesCacheSecret
+import com.messenger.client.services.chatMessagesCacheNowMillis
+import com.messenger.client.services.rememberChatMessagesCache
 import com.messenger.client.ui.components.CachedConversationAvatar
 import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
@@ -169,16 +179,32 @@ fun ChatDetailScreen(
     var deletingMessageIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showAttachmentsBrowser by remember { mutableStateOf(false) }
     var selectedAttachmentsTab by remember { mutableStateOf(ChatAttachmentsTab.Media) }
+    var isLoadingHistory by remember { mutableStateOf(false) }
+    var hasMoreHistory by remember { mutableStateOf(false) }
+    var nextHistoryCursor by remember { mutableStateOf<String?>(null) }
+    var initialScrollMessageId by remember { mutableStateOf<String?>(null) }
+    var pendingInitialReadMessageId by remember { mutableStateOf<String?>(null) }
+    var pendingHistoryRestore by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var pendingScrollToBottom by remember { mutableStateOf(false) }
+    var isAwaitingInitialPosition by remember { mutableStateOf(false) }
+    var hasLoadedChatSnapshot by remember { mutableStateOf(false) }
+    var conversationHistoryAttachments by remember { mutableStateOf<List<ConversationAttachmentEntry>>(emptyList()) }
+    var areConversationAttachmentsLoading by remember { mutableStateOf(false) }
+    var hasLoadedConversationAttachments by remember { mutableStateOf(false) }
+    var conversationAttachmentsError by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
     val token by authState.jwtToken.collectAsState()
+    val refreshToken by authState.refreshToken.collectAsState()
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
+    val currentSessionId by authState.currentSessionId.collectAsState()
     val focusManager = LocalFocusManager.current
     val isDraftConversation = conversationState.id.startsWith(DraftConversationIdPrefix)
     val listState = rememberLazyListState()
+    val chatMessagesCache = rememberChatMessagesCache()
     val chatBackground = Color(0xFFF6F7FB)
     val chatAccent = Color(0xFF4F6FF0)
     val bubbleColors = ChatBubbleColors(
@@ -204,6 +230,17 @@ fun ChatDetailScreen(
         focusedLabelColor = chatAccent,
         cursorColor = chatAccent
     )
+    val messagePageSize = 50
+    val historyPrefetchThreshold = 3
+    val chatCacheUserId = currentUserId?.ifBlank { null }
+    val chatCacheSecret = remember(currentUserId, refreshToken, token, currentSessionId) {
+        buildChatMessagesCacheSecret(
+            userId = currentUserId,
+            refreshToken = refreshToken,
+            jwtToken = token,
+            sessionId = currentSessionId
+        )
+    }
     fun parseInstantOrNull(value: String): Instant? {
         if (value.isBlank()) return null
         return runCatching { Instant.parse(value) }.getOrNull()
@@ -239,7 +276,20 @@ fun ChatDetailScreen(
         }
     }
 
-    val attachmentEntries = remember(messages, deletingMessageIds, conversationState.id) {
+    fun normalizeAttachmentEntries(items: List<ConversationAttachmentEntry>): List<ConversationAttachmentEntry> {
+        val deduped = LinkedHashMap<String, ConversationAttachmentEntry>()
+        for (entry in items) {
+            deduped[entry.key] = entry
+        }
+        return deduped.values
+            .sortedWith(
+                compareByDescending<ConversationAttachmentEntry> { it.sentAtInstant ?: Instant.DISTANT_PAST }
+                    .thenByDescending { it.messageOrder }
+                    .thenByDescending { it.key }
+            )
+    }
+
+    val loadedMessageAttachmentEntries = remember(messages, deletingMessageIds, conversationState.id) {
         messages.withIndex()
             .filter { (_, message) -> message.id !in deletingMessageIds }
             .flatMap { (index, message) ->
@@ -261,6 +311,9 @@ fun ChatDetailScreen(
                     .thenByDescending { it.messageOrder }
             )
     }
+    val attachmentEntries = remember(loadedMessageAttachmentEntries, conversationHistoryAttachments) {
+        normalizeAttachmentEntries(conversationHistoryAttachments + loadedMessageAttachmentEntries)
+    }
     val mediaAttachmentEntries = remember(attachmentEntries) {
         attachmentEntries.filter { it.isMedia }
     }
@@ -270,6 +323,14 @@ fun ChatDetailScreen(
     val uploadTasks by uploadManager.tasks.collectAsState()
     val conversationUploadTasks = remember(uploadTasks, conversationState.id) {
         uploadTasks.filter { it.conversationId == conversationState.id }
+    }
+    val isNearBottom by remember(listState, messages.size, conversationUploadTasks.size) {
+        derivedStateOf {
+            val totalItems = messages.size + conversationUploadTasks.size
+            if (totalItems == 0) return@derivedStateOf true
+            val lastVisibleItemIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
+            lastVisibleItemIndex >= totalItems - 3
+        }
     }
 
     suspend fun ensureConversationForOutgoingMessage(currentToken: String): ConversationDto? {
@@ -394,15 +455,197 @@ fun ChatDetailScreen(
         }
     }
 
-    fun loadMessages() {
+    fun findFirstUnreadMessageId(items: List<MessageDto>, totalUnreadCount: Int): String? {
+        if (totalUnreadCount <= 0) return null
+        var unreadSeen = 0
+        for (message in items.asReversed()) {
+            if (!currentUserId.isNullOrBlank() && message.senderId == currentUserId) {
+                continue
+            }
+            unreadSeen += 1
+            if (unreadSeen == totalUnreadCount) {
+                return message.id.ifBlank { null }
+            }
+        }
+        return null
+    }
+
+    fun findLatestIncomingMessageId(items: List<MessageDto>): String? {
+        return items.lastOrNull { message ->
+            message.id.isNotBlank() && (currentUserId.isNullOrBlank() || message.senderId != currentUserId)
+        }?.id
+    }
+
+    suspend fun markConversationReadUpTo(messageId: String) {
+        if (messageId.isBlank() || isDraftConversation) return
+        val currentToken = token
+        if (currentToken.isNullOrBlank()) return
+
+        if (webSocketService.isConnected) {
+            webSocketService.markAsRead(conversationState.id, messageId)
+        } else {
+            val result = apiService.markAsRead(currentToken, conversationState.id, messageId)
+            if (result.isFailure) {
+                pendingReadMessageId = messageId
+                return
+            }
+        }
+
+        pendingReadMessageId = null
+        loadUnreadCount()
+    }
+
+    fun requestScrollToBottom() {
+        pendingScrollToBottom = true
+    }
+
+    fun loadConversationAttachments(force: Boolean = false) {
+        if (isDraftConversation) {
+            conversationHistoryAttachments = emptyList()
+            hasLoadedConversationAttachments = true
+            areConversationAttachmentsLoading = false
+            conversationAttachmentsError = null
+            return
+        }
+        if (areConversationAttachmentsLoading) return
+        if (hasLoadedConversationAttachments && !force) return
+
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                return@launch
+            }
+
+            areConversationAttachmentsLoading = true
+            conversationAttachmentsError = null
+
+            val aggregatedEntries = mutableListOf<ConversationAttachmentEntry>()
+            var cursor: String? = null
+            var hasMore = true
+            var requestIndex = 0
+            var failed = false
+
+            while (hasMore) {
+                val result = apiService.getConversationAttachments(
+                    token = currentToken,
+                    conversationId = conversationState.id,
+                    limit = 100,
+                    cursor = cursor
+                )
+
+                result.fold(
+                    onSuccess = { response ->
+                        aggregatedEntries += response.attachments.mapIndexed { index, dto ->
+                            dto.toConversationAttachmentEntry(
+                                fallbackConversationId = conversationState.id,
+                                order = requestIndex + index
+                            )
+                        }
+                        conversationHistoryAttachments = normalizeAttachmentEntries(aggregatedEntries)
+                        requestIndex += response.attachments.size
+                        cursor = response.nextCursor
+                        hasMore = response.hasMore && !cursor.isNullOrBlank()
+                    },
+                    onFailure = { error ->
+                        conversationAttachmentsError = error.message ?: "Не удалось загрузить вложения"
+                        hasMore = false
+                        failed = true
+                    }
+                )
+            }
+
+            hasLoadedConversationAttachments = !failed
+            areConversationAttachmentsLoading = false
+        }
+    }
+
+    fun applyLoadedMessages(
+        items: List<MessageDto>,
+        unreadSnapshot: Int,
+        hasMore: Boolean,
+        nextCursor: String?,
+        shouldMarkReadAfterPositioning: Boolean
+    ) {
+        val normalizedMessages = normalizeMessages(items)
+        val firstUnreadMessageId = findFirstUnreadMessageId(normalizedMessages, unreadSnapshot)
+
+        messages = normalizedMessages
+        unreadCount = unreadSnapshot
+        hasMoreHistory = hasMore
+        nextHistoryCursor = nextCursor
+        initialScrollMessageId = when {
+            firstUnreadMessageId != null -> firstUnreadMessageId
+            unreadSnapshot > 0 -> normalizedMessages.firstOrNull()?.id
+            else -> normalizedMessages.lastOrNull()?.id
+        }
+        pendingInitialReadMessageId = if (shouldMarkReadAfterPositioning && unreadSnapshot > 0) {
+            findLatestIncomingMessageId(normalizedMessages)
+        } else {
+            null
+        }
+        isAwaitingInitialPosition = normalizedMessages.isNotEmpty()
+        hasLoadedChatSnapshot = true
+    }
+
+    fun loadOlderMessages() {
+        val cursor = nextHistoryCursor ?: return
+        if (isLoading || isLoadingHistory || isDraftConversation) return
+
+        scope.launch {
+            val currentToken = token
+            if (currentToken.isNullOrBlank()) {
+                return@launch
+            }
+
+            val anchorIndex = listState.firstVisibleItemIndex
+            val anchorOffset = listState.firstVisibleItemScrollOffset
+            isLoadingHistory = true
+
+            val result = apiService.getMessages(
+                token = currentToken,
+                conversationId = conversationState.id,
+                limit = messagePageSize,
+                cursor = cursor
+            )
+            result.fold(
+                onSuccess = { response ->
+                    val previousSize = messages.size
+                    val updatedMessages = normalizeMessages(response.messages + messages)
+                    val addedCount = updatedMessages.size - previousSize
+                    messages = updatedMessages
+                    hasMoreHistory = response.hasMore && !response.nextCursor.isNullOrBlank()
+                    nextHistoryCursor = response.nextCursor
+                    hasLoadedChatSnapshot = true
+                    if (addedCount > 0) {
+                        pendingHistoryRestore = (anchorIndex + addedCount) to anchorOffset
+                    }
+                },
+                onFailure = { }
+            )
+            isLoadingHistory = false
+        }
+    }
+
+    fun loadMessages(cachedEntry: ChatMessagesCacheEntry? = null) {
         scope.launch {
             if (isDraftConversation) {
                 messages = emptyList()
                 unreadCount = 0
+                hasMoreHistory = false
+                nextHistoryCursor = null
+                initialScrollMessageId = null
+                pendingInitialReadMessageId = null
+                pendingHistoryRestore = null
+                pendingScrollToBottom = false
+                isLoadingHistory = false
+                isAwaitingInitialPosition = false
+                hasLoadedChatSnapshot = true
                 isLoading = false
                 return@launch
             }
+
             isLoading = true
+            isLoadingHistory = false
             errorMessage = null
             val currentToken = token
             if (currentToken.isNullOrBlank()) {
@@ -411,23 +654,76 @@ fun ChatDetailScreen(
                 return@launch
             }
 
-            val result = apiService.getMessages(currentToken, conversationState.id)
-            result.fold(
+            val unreadResult = apiService.getUnreadCount(currentToken, conversationState.id)
+            val unreadSnapshot = unreadResult.getOrNull()?.count ?: cachedEntry?.unreadCount ?: 0
+            val canUseWarmCache = cachedEntry != null &&
+                unreadResult.isSuccess &&
+                cachedEntry.unreadCount == unreadSnapshot &&
+                cachedEntry.isWarm(
+                    nowEpochMillis = chatMessagesCacheNowMillis(),
+                    maxAgeMillis = ChatMessagesWarmCacheDurationMs
+                )
+
+            if (canUseWarmCache) {
+                applyLoadedMessages(
+                    items = cachedEntry.messages,
+                    unreadSnapshot = unreadSnapshot,
+                    hasMore = cachedEntry.hasMoreHistory,
+                    nextCursor = cachedEntry.nextHistoryCursor,
+                    shouldMarkReadAfterPositioning = true
+                )
+                isLoading = false
+                return@launch
+            }
+
+            val initialPage = apiService.getMessages(
+                token = currentToken,
+                conversationId = conversationState.id,
+                limit = messagePageSize
+            )
+
+            initialPage.fold(
                 onSuccess = { response ->
-                    messages = normalizeMessages(response.messages)
-                    val lastIncoming = messages.lastOrNull { it.senderId != authState.getUserId() }
-                    if (lastIncoming?.id?.isNotBlank() == true) {
-                        if (webSocketService.isConnected) {
-                            webSocketService.markAsRead(conversationState.id, lastIncoming.id)
-                            loadUnreadCount()
-                        } else {
-                            pendingReadMessageId = lastIncoming.id
-                        }
+                    var loadedMessages = normalizeMessages(response.messages)
+                    var cursor = response.nextCursor
+                    var canLoadMore = response.hasMore && !cursor.isNullOrBlank()
+                    var firstUnreadMessageId = findFirstUnreadMessageId(loadedMessages, unreadSnapshot)
+
+                    while (unreadSnapshot > 0 && firstUnreadMessageId == null && canLoadMore) {
+                        val olderResponse = apiService.getMessages(
+                            token = currentToken,
+                            conversationId = conversationState.id,
+                            limit = messagePageSize,
+                            cursor = cursor
+                        ).getOrNull() ?: break
+
+                        loadedMessages = normalizeMessages(olderResponse.messages + loadedMessages)
+                        cursor = olderResponse.nextCursor
+                        canLoadMore = olderResponse.hasMore && !cursor.isNullOrBlank()
+                        firstUnreadMessageId = findFirstUnreadMessageId(loadedMessages, unreadSnapshot)
                     }
+
+                    applyLoadedMessages(
+                        items = loadedMessages,
+                        unreadSnapshot = unreadSnapshot,
+                        hasMore = canLoadMore,
+                        nextCursor = cursor,
+                        shouldMarkReadAfterPositioning = true
+                    )
                     isLoading = false
                 },
                 onFailure = { error ->
-                    errorMessage = error.message ?: "Не удалось загрузить сообщения"
+                    if (cachedEntry != null) {
+                        applyLoadedMessages(
+                            items = cachedEntry.messages,
+                            unreadSnapshot = unreadSnapshot,
+                            hasMore = cachedEntry.hasMoreHistory,
+                            nextCursor = cachedEntry.nextHistoryCursor,
+                            shouldMarkReadAfterPositioning = true
+                        )
+                    } else {
+                        errorMessage = error.message ?: "Не удалось загрузить сообщения"
+                    }
                     isLoading = false
                 }
             )
@@ -458,6 +754,7 @@ fun ChatDetailScreen(
                 newMessage = TextFieldValue("")
                 replyToMessage = null
                 pendingAttachments = emptyList()
+                requestScrollToBottom()
                 return@launch
             }
 
@@ -474,6 +771,7 @@ fun ChatDetailScreen(
                     newMessage = TextFieldValue("")
                     replyToMessage = null
                     pendingAttachments = emptyList()
+                    requestScrollToBottom()
                 },
                 onFailure = { error ->
                     errorMessage = error.message ?: "Не удалось отправить сообщение"
@@ -530,6 +828,7 @@ fun ChatDetailScreen(
         scope.launch {
             delay(220)
             messages = normalizeMessages(messages.filterNot { it.id == messageId })
+            conversationHistoryAttachments = conversationHistoryAttachments.filterNot { it.messageId == messageId }
             deletingMessageIds = deletingMessageIds - messageId
             loadConversation()
             loadUnreadCount()
@@ -636,6 +935,7 @@ fun ChatDetailScreen(
                         sendResult.fold(
                             onSuccess = { message ->
                                 messages = normalizeMessages(messages + message)
+                                requestScrollToBottom()
                             },
                             onFailure = { error ->
                                 errorMessage = error.message ?: "Инвайт создан, но не удалось отправить сообщение"
@@ -750,12 +1050,44 @@ fun ChatDetailScreen(
         }
     }
 
-    LaunchedEffect(conversationState.id) {
-        loadMessages()
-        loadUnreadCount()
+    LaunchedEffect(conversationState.id, token, chatCacheUserId, chatCacheSecret) {
+        if (token.isNullOrBlank() && !isDraftConversation) return@LaunchedEffect
+        messages = emptyList()
+        unreadCount = 0
+        hasMoreHistory = false
+        nextHistoryCursor = null
+        initialScrollMessageId = null
+        pendingInitialReadMessageId = null
+        pendingHistoryRestore = null
+        pendingScrollToBottom = false
+        pendingReadMessageId = null
+        isAwaitingInitialPosition = false
+        hasLoadedChatSnapshot = false
+        conversationHistoryAttachments = emptyList()
+        areConversationAttachmentsLoading = false
+        hasLoadedConversationAttachments = false
+        conversationAttachmentsError = null
+
+        val cachedEntry = if (!isDraftConversation && chatCacheUserId != null && chatCacheSecret != null) {
+            chatMessagesCache.read(
+                conversationId = conversationState.id,
+                userId = chatCacheUserId,
+                secret = chatCacheSecret
+            )
+        } else {
+            null
+        }
+
+        loadMessages(cachedEntry)
         loadConversation()
         readMessageIds = emptySet()
         typingUsers = emptyMap()
+    }
+
+    LaunchedEffect(showAttachmentsBrowser, conversationState.id, token) {
+        if (showAttachmentsBrowser) {
+            loadConversationAttachments()
+        }
     }
 
     LaunchedEffect(conversationState.id, token) {
@@ -824,15 +1156,11 @@ fun ChatDetailScreen(
                 if (!currentUserId.isNullOrBlank() && msg.senderId == currentUserId) {
                     return@collect
                 }
+                val shouldAutoRead = isNearBottom || messages.isEmpty()
                 messages = normalizeMessages(messages + msg)
-                val currentToken = token
-                if (!currentToken.isNullOrBlank() && msg.id.isNotBlank()) {
-                    if (webSocketService.isConnected) {
-                        webSocketService.markAsRead(conversationState.id, msg.id)
-                        loadUnreadCount()
-                    } else {
-                        pendingReadMessageId = msg.id
-                    }
+                if (shouldAutoRead && msg.id.isNotBlank()) {
+                    requestScrollToBottom()
+                    markConversationReadUpTo(msg.id)
                 } else {
                     loadUnreadCount()
                 }
@@ -911,14 +1239,94 @@ fun ChatDetailScreen(
             }
         if (hasMergedSentMessage) {
             loadConversation()
+            requestScrollToBottom()
         }
     }
 
-    LaunchedEffect(messages.size, conversationUploadTasks.size) {
+    LaunchedEffect(
+        conversationState.id,
+        chatCacheUserId,
+        chatCacheSecret,
+        hasLoadedChatSnapshot,
+        messages,
+        unreadCount,
+        hasMoreHistory,
+        nextHistoryCursor
+    ) {
+        if (isDraftConversation || !hasLoadedChatSnapshot) return@LaunchedEffect
+        val userId = chatCacheUserId ?: return@LaunchedEffect
+        val secret = chatCacheSecret ?: return@LaunchedEffect
+        chatMessagesCache.write(
+            conversationId = conversationState.id,
+            userId = userId,
+            secret = secret,
+            entry = buildChatMessagesCacheEntry(
+                messages = messages,
+                unreadCount = unreadCount,
+                hasMoreHistory = hasMoreHistory,
+                nextHistoryCursor = nextHistoryCursor
+            )
+        )
+    }
+
+    LaunchedEffect(messages.size, initialScrollMessageId) {
+        if (!isAwaitingInitialPosition) return@LaunchedEffect
+        if (messages.isEmpty()) {
+            initialScrollMessageId = null
+            pendingInitialReadMessageId = null
+            isAwaitingInitialPosition = false
+            return@LaunchedEffect
+        }
+
+        val targetIndex = initialScrollMessageId
+            ?.let(messageIndexById::get)
+            ?: messages.lastIndex
+        listState.scrollToItem(targetIndex)
+        initialScrollMessageId = null
+        val initialReadTarget = pendingInitialReadMessageId
+        pendingInitialReadMessageId = null
+        isAwaitingInitialPosition = false
+        initialReadTarget?.let { messageId ->
+            markConversationReadUpTo(messageId)
+        }
+    }
+
+    LaunchedEffect(messages.size, pendingHistoryRestore) {
+        val restore = pendingHistoryRestore ?: return@LaunchedEffect
+        if (messages.isEmpty()) {
+            pendingHistoryRestore = null
+            return@LaunchedEffect
+        }
+        listState.scrollToItem(
+            index = restore.first.coerceAtMost(messages.lastIndex),
+            scrollOffset = restore.second
+        )
+        pendingHistoryRestore = null
+    }
+
+    LaunchedEffect(messages.size, conversationUploadTasks.size, pendingScrollToBottom) {
+        if (!pendingScrollToBottom) return@LaunchedEffect
         val totalItems = messages.size + conversationUploadTasks.size
         if (totalItems > 0) {
             listState.animateScrollToItem(totalItems - 1)
         }
+        pendingScrollToBottom = false
+    }
+
+    LaunchedEffect(conversationState.id, hasMoreHistory, isLoadingHistory, isLoading, messages.size) {
+        if (isDraftConversation || messages.isEmpty()) return@LaunchedEffect
+        snapshotFlow { listState.isScrollInProgress to listState.firstVisibleItemIndex }
+            .collect { (isScrolling, firstVisibleIndex) ->
+                if (
+                    isScrolling &&
+                    firstVisibleIndex <= historyPrefetchThreshold &&
+                    hasMoreHistory &&
+                    !isLoading &&
+                    !isLoadingHistory
+                ) {
+                    loadOlderMessages()
+                }
+            }
     }
 
     LaunchedEffect(newMessage.text) {
@@ -1182,57 +1590,76 @@ fun ChatDetailScreen(
                     }
                 }
             } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    items(
-                        items = messages,
-                        key = { message ->
-                            message.id.ifBlank {
-                                "${message.senderId}:${message.sentAt}:${message.content.hashCode()}"
+                Box(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (isAwaitingInitialPosition) 0f else 1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(
+                            items = messages,
+                            key = { message ->
+                                message.id.ifBlank {
+                                    "${message.senderId}:${message.sentAt}:${message.content.hashCode()}"
+                                }
+                            }
+                        ) { message ->
+                            androidx.compose.animation.AnimatedVisibility(
+                                visible = message.id !in deletingMessageIds,
+                                exit = fadeOut() + shrinkVertically()
+                            ) {
+                                MessageBubble(
+                                    message = message,
+                                    repliedMessage = message.replyToMessageId?.let(messagesById::get),
+                                    isHighlighted = highlightedMessageId == message.id,
+                                    isOwn = message.senderId == authState.getUserId(),
+                                    isRead = readMessageIds.contains(message.id),
+                                    timeLabel = formatTime(message.sentAt),
+                                    showSenderName = conversationState.type == "group",
+                                    colors = bubbleColors,
+                                    onReply = {
+                                        if (editingMessage == null) {
+                                            replyToMessage = it
+                                        }
+                                    },
+                                    onOpenRepliedMessage = ::scrollToMessage,
+                                    onOpenActions = { selectedMessageForActions = it },
+                                    apiService = apiService,
+                                    token = token,
+                                    onOpenTransferChannelFromInvite = { inviteToken, transferChannelId ->
+                                        openTransferChannelFromInvite(inviteToken, transferChannelId)
+                                    }
+                                )
                             }
                         }
-                    ) { message ->
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = message.id !in deletingMessageIds,
-                            exit = fadeOut() + shrinkVertically()
-                        ) {
-                            MessageBubble(
-                                message = message,
-                                repliedMessage = message.replyToMessageId?.let(messagesById::get),
-                                isHighlighted = highlightedMessageId == message.id,
-                                isOwn = message.senderId == authState.getUserId(),
-                                isRead = readMessageIds.contains(message.id),
-                                timeLabel = formatTime(message.sentAt),
+                        items(
+                            items = conversationUploadTasks,
+                            key = { task -> task.id }
+                        ) { task ->
+                            PendingUploadBubble(
+                                task = task,
+                                repliedMessage = task.replyToMessageId?.let(messagesById::get),
+                                timeLabel = formatTime(task.createdAt),
                                 showSenderName = conversationState.type == "group",
-                                colors = bubbleColors,
-                                onReply = {
-                                    if (editingMessage == null) {
-                                        replyToMessage = it
-                                    }
-                                },
-                                onOpenRepliedMessage = ::scrollToMessage,
-                                onOpenActions = { selectedMessageForActions = it },
-                                apiService = apiService,
-                                token = token,
-                                onOpenTransferChannelFromInvite = { inviteToken, transferChannelId ->
-                                    openTransferChannelFromInvite(inviteToken, transferChannelId)
-                                }
+                                colors = bubbleColors
                             )
                         }
                     }
-                    items(
-                        items = conversationUploadTasks,
-                        key = { task -> task.id }
-                    ) { task ->
-                        PendingUploadBubble(
-                            task = task,
-                            repliedMessage = task.replyToMessageId?.let(messagesById::get),
-                            timeLabel = formatTime(task.createdAt),
-                            showSenderName = conversationState.type == "group",
-                            colors = bubbleColors
+
+                    if (isLoadingHistory) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 12.dp)
+                                .size(22.dp)
+                        )
+                    }
+
+                    if (isAwaitingInitialPosition) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.align(Alignment.Center)
                         )
                     }
                 }
@@ -1539,6 +1966,8 @@ fun ChatDetailScreen(
             ChatAttachmentsBrowser(
                 mediaAttachments = mediaAttachmentEntries,
                 fileAttachments = fileAttachmentEntries,
+                isLoading = areConversationAttachmentsLoading,
+                errorMessage = conversationAttachmentsError,
                 selectedTab = selectedAttachmentsTab,
                 onSelectTab = { selectedAttachmentsTab = it },
                 onClose = { showAttachmentsBrowser = false },
@@ -2214,6 +2643,24 @@ private data class ConversationAttachmentEntry(
         get() = isImage || isVideo
 }
 
+private fun ConversationAttachmentEntryDto.toConversationAttachmentEntry(
+    fallbackConversationId: String,
+    order: Int
+): ConversationAttachmentEntry {
+    val resolvedConversationId = conversationId.ifBlank { fallbackConversationId }
+    val resolvedMessageId = messageId.ifBlank { "attachment-message-$order" }
+    return ConversationAttachmentEntry(
+        key = "$resolvedMessageId:${attachment.id}",
+        conversationId = resolvedConversationId,
+        messageId = resolvedMessageId,
+        senderLabel = senderLabel.ifBlank { "Собеседник" },
+        sentAt = sentAt,
+        sentAtInstant = parseAttachmentInstantOrNull(sentAt),
+        messageOrder = Int.MAX_VALUE - order,
+        attachment = attachment
+    )
+}
+
 private data class AttachmentDownloadState(
     val cachedPath: String,
     val cachedBytes: ByteArray?,
@@ -2357,6 +2804,8 @@ private fun sanitizeInviteMetaLines(content: String): String {
 private fun ChatAttachmentsBrowser(
     mediaAttachments: List<ConversationAttachmentEntry>,
     fileAttachments: List<ConversationAttachmentEntry>,
+    isLoading: Boolean,
+    errorMessage: String?,
     selectedTab: ChatAttachmentsTab,
     onSelectTab: (ChatAttachmentsTab) -> Unit,
     onClose: () -> Unit,
@@ -2393,13 +2842,29 @@ private fun ChatAttachmentsBrowser(
                     )
                     Text(
                         text = if (totalAttachments == 0) {
-                            "В этом диалоге пока нет вложений"
+                            if (isLoading) {
+                                "Загружаем вложения из всей истории чата"
+                            } else {
+                                "В этом диалоге пока нет вложений"
+                            }
                         } else {
-                            "Медиа: ${mediaAttachments.size} • Файлы: ${fileAttachments.size}"
+                            buildString {
+                                append("Медиа: ${mediaAttachments.size} • Файлы: ${fileAttachments.size}")
+                                if (isLoading) {
+                                    append(" • обновляем историю")
+                                }
+                            }
                         },
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f)
                     )
+                    if (!errorMessage.isNullOrBlank()) {
+                        Text(
+                            text = errorMessage,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
                 IconButton(onClick = onClose) {
                     Icon(
@@ -2504,6 +2969,16 @@ private fun ChatAttachmentsBrowser(
                             }
                         }
                     }
+                }
+
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 12.dp)
+                            .size(22.dp),
+                        strokeWidth = 2.dp
+                    )
                 }
             }
         }
