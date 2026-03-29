@@ -2,12 +2,14 @@
 /.gradle/
 /.gradle-local/
 /.gradle-home/
+/.android-home/
 **/.gradle-home/
 **/.gradle/
 **/.gradle-local/
 **/build/
 **/out/
 **/.kotlin/
+**/.android-home/
 
 # IntelliJ / Android Studio
 /.idea/

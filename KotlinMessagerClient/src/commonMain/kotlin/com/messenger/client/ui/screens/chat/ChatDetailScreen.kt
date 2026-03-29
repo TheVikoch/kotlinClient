@@ -2,6 +2,7 @@
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -14,6 +15,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
@@ -43,19 +45,27 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.InsertEmoticon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -89,12 +99,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -102,19 +115,30 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.messenger.client.models.ConversationDto
 import com.messenger.client.models.ConversationAttachmentEntryDto
 import com.messenger.client.models.MessageAttachmentDto
 import com.messenger.client.models.MessageDto
+import com.messenger.client.media.AudioAttachmentPlayer
 import com.messenger.client.media.FullScreenVideo
 import com.messenger.client.media.InlineVideo
 import com.messenger.client.media.PickedFile
 import com.messenger.client.media.ZoomableImage
 import com.messenger.client.media.AttachmentPicker
+import com.messenger.client.media.ChatMediaCaptureMode
+import com.messenger.client.media.ChatMediaRecorderPreview
+import com.messenger.client.media.ChatMediaRecorderPhase
+import com.messenger.client.media.ChatMediaRecorderUiState
 import com.messenger.client.media.buildAttachmentCacheKey
 import com.messenger.client.media.decodeImage
+import com.messenger.client.media.decodeVideoPreview
 import com.messenger.client.media.rememberFileOpener
+import com.messenger.client.media.rememberChatMediaRecorder
 import com.messenger.client.media.rememberMediaCache
+import com.messenger.client.media.VideoPlayerPlaybackMode
+import com.messenger.client.media.VideoPlayerScaleMode
+import com.messenger.client.media.VideoPlayerView
 import com.messenger.client.services.ApiService
 import com.messenger.client.services.AuthState
 import com.messenger.client.services.ChatMessagesWarmCacheDurationMs
@@ -131,12 +155,15 @@ import com.messenger.client.services.rememberChatMessagesCache
 import com.messenger.client.ui.components.CachedConversationAvatar
 import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import java.io.File
 import kotlin.math.roundToInt
 
 @Composable
@@ -195,12 +222,33 @@ fun ChatDetailScreen(
 
     val scope = rememberCoroutineScope()
     val apiService = remember { ApiService() }
+    val mediaRecorder = rememberChatMediaRecorder(
+        onDraftReady = { draft ->
+            var nextId = nextPendingAttachmentId + 1
+            nextPendingAttachmentId = nextId
+            pendingAttachments = pendingAttachments + PendingAttachment(
+                id = "local-$nextId",
+                fileName = draft.fileName,
+                contentType = draft.contentType,
+                size = draft.bytes.size.toLong(),
+                bytes = draft.bytes,
+                previewBytes = draft.previewBytes,
+                localPath = draft.localPath,
+                durationMillis = draft.durationMillis,
+                kind = draft.kind
+            )
+        },
+        onError = { error ->
+            errorMessage = error
+        }
+    )
     val token by authState.jwtToken.collectAsState()
     val refreshToken by authState.refreshToken.collectAsState()
     val currentUserEmail by authState.currentUserEmail.collectAsState()
     val currentUserDisplayName by authState.currentUserDisplayName.collectAsState()
     val currentUserId by authState.currentUserId.collectAsState()
     val currentSessionId by authState.currentSessionId.collectAsState()
+    val recorderState by mediaRecorder.uiState.collectAsState()
     val focusManager = LocalFocusManager.current
     val isDraftConversation = conversationState.id.startsWith(DraftConversationIdPrefix)
     val listState = rememberLazyListState()
@@ -317,8 +365,14 @@ fun ChatDetailScreen(
     val mediaAttachmentEntries = remember(attachmentEntries) {
         attachmentEntries.filter { it.isMedia }
     }
+    val voiceNoteAttachmentEntries = remember(attachmentEntries) {
+        attachmentEntries.filter { it.isVoiceNote }
+    }
+    val videoNoteAttachmentEntries = remember(attachmentEntries) {
+        attachmentEntries.filter { it.isVideoNote }
+    }
     val fileAttachmentEntries = remember(attachmentEntries) {
-        attachmentEntries.filterNot { it.isMedia }
+        attachmentEntries.filter { it.isFile }
     }
     val uploadTasks by uploadManager.tasks.collectAsState()
     val conversationUploadTasks = remember(uploadTasks, conversationState.id) {
@@ -730,6 +784,15 @@ fun ChatDetailScreen(
         }
     }
 
+    fun clearPendingAttachments() {
+        pendingAttachments.forEach { attachment ->
+            attachment.localPath?.let { path ->
+                runCatching { File(path).delete() }
+            }
+        }
+        pendingAttachments = emptyList()
+    }
+
     fun sendMessage(content: String, replyToMessageId: String?) {
         scope.launch {
             val currentToken = token
@@ -753,7 +816,7 @@ fun ChatDetailScreen(
                 )
                 newMessage = TextFieldValue("")
                 replyToMessage = null
-                pendingAttachments = emptyList()
+                clearPendingAttachments()
                 requestScrollToBottom()
                 return@launch
             }
@@ -770,7 +833,7 @@ fun ChatDetailScreen(
                     messages = normalizeMessages(messages + message)
                     newMessage = TextFieldValue("")
                     replyToMessage = null
-                    pendingAttachments = emptyList()
+                    clearPendingAttachments()
                     requestScrollToBottom()
                 },
                 onFailure = { error ->
@@ -1130,7 +1193,8 @@ fun ChatDetailScreen(
                 contentType = file.contentType,
                 size = file.bytes.size.toLong(),
                 bytes = file.bytes,
-                previewBytes = if (file.contentType.startsWith("image/")) file.bytes else null
+                previewBytes = if (file.contentType.startsWith("image/")) file.bytes else null,
+                kind = detectRecordedAttachmentKind(file.name, file.contentType)
             )
         }
         nextPendingAttachmentId = nextId
@@ -1138,6 +1202,9 @@ fun ChatDetailScreen(
     }
 
     fun removePendingAttachment(id: String) {
+        pendingAttachments.firstOrNull { it.id == id }?.localPath?.let { path ->
+            runCatching { File(path).delete() }
+        }
         pendingAttachments = pendingAttachments.filterNot { it.id == id }
     }
 
@@ -1393,6 +1460,10 @@ fun ChatDetailScreen(
             .fillMaxSize()
             .background(chatBackground)
     ) {
+        val shouldKeepVideoPreviewMounted = recorderState.supportsVideoNotes &&
+            recorderState.selectedMode == ChatMediaCaptureMode.VideoNote
+        val shouldShowVideoPreviewOverlay = shouldKeepVideoPreviewMounted &&
+            (recorderState.isRecording || recorderState.isPaused)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1518,13 +1589,12 @@ fun ChatDetailScreen(
                         focusManager.clearFocus(force = true)
                         showEmojiPicker = false
                         showAttachmentsBrowser = true
-                        selectedAttachmentsTab = if (
-                            mediaAttachmentEntries.isNotEmpty() || fileAttachmentEntries.isEmpty()
-                        ) {
-                            ChatAttachmentsTab.Media
-                        } else {
-                            ChatAttachmentsTab.Files
-                        }
+                        selectedAttachmentsTab = preferredAttachmentsTab(
+                            mediaAttachments = mediaAttachmentEntries,
+                            voiceAttachments = voiceNoteAttachmentEntries,
+                            videoNoteAttachments = videoNoteAttachmentEntries,
+                            fileAttachments = fileAttachmentEntries
+                        )
                     }
                 ) {
                     Icon(
@@ -1768,77 +1838,166 @@ fun ChatDetailScreen(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     pendingAttachments.forEach { attachment ->
+                        val isVoiceNote = attachment.kind == ChatMediaCaptureMode.VoiceNote
+                        val isVideoNote = attachment.kind == ChatMediaCaptureMode.VideoNote
                         val isImage = attachment.contentType.startsWith("image/")
                         val isVideo = attachment.contentType.startsWith("video/")
-                        val previewBitmap = if (isImage && attachment.previewBytes != null) {
+                        val previewBitmap = if ((isImage || isVideoNote) && attachment.previewBytes != null) {
                             remember(attachment.id, attachment.previewBytes) {
                                 decodeImage(attachment.previewBytes)
                             }
                         } else {
                             null
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (previewBitmap != null) {
-                                androidx.compose.foundation.Image(
-                                    bitmap = previewBitmap,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(46.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Crop
-                                )
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .size(46.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(Color.White),
-                                    contentAlignment = Alignment.Center
+                        when {
+                            isVoiceNote && !attachment.localPath.isNullOrBlank() -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.InsertDriveFile,
-                                        contentDescription = null,
-                                        tint = if (isVideo) chatAccent else Color(0xFF4566C7)
+                                    AudioAttachmentPlayer(
+                                        path = attachment.localPath,
+                                        accentColor = chatAccent,
+                                        contentColor = MaterialTheme.colorScheme.onSurface,
+                                        secondaryColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                        compact = false,
+                                        modifier = Modifier.weight(1f)
                                     )
+                                    IconButton(onClick = { removePendingAttachment(attachment.id) }) {
+                                        Icon(
+                                            Icons.Filled.Close,
+                                            contentDescription = "Убрать голосовое",
+                                            modifier = Modifier.height(16.dp)
+                                        )
+                                    }
                                 }
                             }
-                            val title = when {
-                                isImage -> attachment.fileName.ifBlank { "Фото" }
-                                isVideo -> attachment.fileName.ifBlank { "Видео" }
-                                else -> attachment.fileName.ifBlank { "Файл" }
+
+                            isVideoNote -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    if (previewBitmap != null) {
+                                        androidx.compose.foundation.Image(
+                                            bitmap = previewBitmap,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(72.dp)
+                                                .clip(CircleShape),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(72.dp)
+                                                .clip(CircleShape)
+                                                .background(chatAccent.copy(alpha = 0.12f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Videocam,
+                                                contentDescription = null,
+                                                tint = chatAccent
+                                            )
+                                        }
+                                    }
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Text(
+                                            text = "Видео кружок",
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = buildAttachmentMetaLabel(
+                                                title = "Кружок",
+                                                durationMillis = attachment.durationMillis,
+                                                size = attachment.size
+                                            ),
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                        )
+                                    }
+                                    IconButton(onClick = { removePendingAttachment(attachment.id) }) {
+                                        Icon(
+                                            Icons.Filled.Close,
+                                            contentDescription = "Убрать кружок",
+                                            modifier = Modifier.height(16.dp)
+                                        )
+                                    }
+                                }
                             }
-                            val meta = when {
-                                isImage -> "Фото • ${formatFileSize(attachment.size)}"
-                                isVideo -> "Видео • ${formatFileSize(attachment.size)}"
-                                else -> "Файл • ${formatFileSize(attachment.size)}"
-                            }
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Text(
-                                    text = title,
-                                    fontSize = 14.sp,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = meta,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                            IconButton(onClick = { removePendingAttachment(attachment.id) }) {
-                                Icon(
-                                    Icons.Filled.Close,
-                                    contentDescription = "Убрать файл",
-                                    modifier = Modifier.height(16.dp)
-                                )
+
+                            else -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (previewBitmap != null) {
+                                        androidx.compose.foundation.Image(
+                                            bitmap = previewBitmap,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(RoundedCornerShape(8.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(Color.White),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.InsertDriveFile,
+                                                contentDescription = null,
+                                                tint = if (isVideo) chatAccent else Color(0xFF4566C7)
+                                            )
+                                        }
+                                    }
+                                    val title = when {
+                                        isImage -> attachment.fileName.ifBlank { "Фото" }
+                                        isVideo -> attachment.fileName.ifBlank { "Видео" }
+                                        else -> attachment.fileName.ifBlank { "Файл" }
+                                    }
+                                    val meta = when {
+                                        isImage -> "Фото • ${formatFileSize(attachment.size)}"
+                                        isVideo -> "Видео • ${formatFileSize(attachment.size)}"
+                                        else -> "Файл • ${formatFileSize(attachment.size)}"
+                                    }
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = title,
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = meta,
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                        )
+                                    }
+                                    IconButton(onClick = { removePendingAttachment(attachment.id) }) {
+                                        Icon(
+                                            Icons.Filled.Close,
+                                            contentDescription = "Убрать файл",
+                                            modifier = Modifier.height(16.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -1864,97 +2023,177 @@ fun ChatDetailScreen(
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
             shape = RoundedCornerShape(18.dp)
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = {
-                        if (editingMessage != null) {
-                            errorMessage = "Во время редактирования нельзя добавлять вложения"
-                        } else {
-                            showAttachmentPicker = true
-                        }
-                    },
-                    enabled = editingMessage == null
-                ) {
-                    Icon(
-                        Icons.Filled.AttachFile,
-                        contentDescription = "Прикрепить файл"
-                    )
+            if (recorderState.phase != ChatMediaRecorderPhase.Idle) {
+                MediaRecorderPanel(
+                    state = recorderState,
+                    accentColor = chatAccent,
+                    onPause = { mediaRecorder.pauseCapture() },
+                    onResume = { mediaRecorder.resumeCapture() },
+                    onSend = { mediaRecorder.finalizeCapture() },
+                    onDiscard = { mediaRecorder.discardCapture() }
+                )
+            } else {
+                val shouldShowSendAction = editingMessage != null ||
+                    newMessage.text.isNotBlank() ||
+                    pendingAttachments.isNotEmpty()
+                val canToggleRecordingMode =
+                    recorderState.supportsVoiceNotes && recorderState.supportsVideoNotes
+                val isSendEnabled = if (editingMessage != null) {
+                    newMessage.text.isNotBlank() || editingMessage!!.attachments.isNotEmpty()
+                } else {
+                    newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()
                 }
-                IconButton(
-                    onClick = {
-                        showEmojiPicker = !showEmojiPicker
-                        if (showEmojiPicker) {
-                            focusManager.clearFocus(force = true)
-                        }
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.InsertEmoticon,
-                        contentDescription = "Открыть эмоджи",
-                        tint = Color.Black,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-                OutlinedTextField(
-                    value = newMessage,
-                    onValueChange = { value ->
-                        newMessage = value
-                    },
-                    label = { Text("Сообщение") },
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .onFocusChanged { focusState ->
-                            if (focusState.isFocused) {
-                                showEmojiPicker = false
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            if (editingMessage != null) {
+                                errorMessage = "Во время редактирования нельзя добавлять вложения"
+                            } else {
+                                showAttachmentPicker = true
                             }
                         },
-                    maxLines = 4,
-                    colors = inputColors
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Button(
-                    onClick = {
-                        if (editingMessage != null) {
-                            updateMessage(editingMessage!!, newMessage.text)
-                        } else if (newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()) {
-                            sendMessage(newMessage.text, replyToMessage?.id)
-                        }
-                    },
-                    enabled = (
-                        if (editingMessage != null) {
-                            newMessage.text.isNotBlank() || editingMessage!!.attachments.isNotEmpty()
-                        } else {
-                            newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()
-                        }
-                    ) && !isLoading,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = chatAccent,
-                        contentColor = Color.White,
-                        disabledContainerColor = chatAccent.copy(alpha = 0.5f),
-                        disabledContentColor = Color.White.copy(alpha = 0.7f)
-                    )
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.height(18.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
+                        enabled = editingMessage == null
+                    ) {
                         Icon(
-                            Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Отправить"
+                            Icons.Filled.AttachFile,
+                            contentDescription = "Прикрепить файл"
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            showEmojiPicker = !showEmojiPicker
+                            if (showEmojiPicker) {
+                                focusManager.clearFocus(force = true)
+                            }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.InsertEmoticon,
+                            contentDescription = "Открыть эмоджи",
+                            tint = Color.Black,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = newMessage,
+                        onValueChange = { value ->
+                            newMessage = value
+                        },
+                        label = { Text("Сообщение") },
+                        modifier = Modifier
+                            .weight(1f)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused) {
+                                    showEmojiPicker = false
+                                }
+                            },
+                        maxLines = 4,
+                        colors = inputColors
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    if (shouldShowSendAction) {
+                        Button(
+                            onClick = {
+                                if (editingMessage != null) {
+                                    updateMessage(editingMessage!!, newMessage.text)
+                                } else if (newMessage.text.isNotBlank() || pendingAttachments.isNotEmpty()) {
+                                    sendMessage(newMessage.text, replyToMessage?.id)
+                                }
+                            },
+                            enabled = isSendEnabled && !isLoading,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = chatAccent,
+                                contentColor = Color.White,
+                                disabledContainerColor = chatAccent.copy(alpha = 0.5f),
+                                disabledContentColor = Color.White.copy(alpha = 0.7f)
+                            )
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.height(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Отправить"
+                                )
+                            }
+                        }
+                    } else {
+                        RecordActionButton(
+                            mode = recorderState.selectedMode,
+                            accentColor = chatAccent,
+                            canToggleMode = canToggleRecordingMode,
+                            onToggleMode = { mediaRecorder.toggleSelectedMode() },
+                            onStartRecording = {
+                                focusManager.clearFocus(force = true)
+                                showEmojiPicker = false
+                                mediaRecorder.beginCapture()
+                            },
+                            onLockRecording = { mediaRecorder.lockCapture() },
+                            onRelease = { mediaRecorder.pauseCapture() }
                         )
                     }
                 }
             }
         }
+        }
+
+        if (shouldKeepVideoPreviewMounted) {
+            BoxWithConstraints(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                val previewSize = minOf(maxWidth - 56.dp, maxHeight - 112.dp).coerceAtMost(360.dp)
+                val mountedSize = if (shouldShowVideoPreviewOverlay) previewSize else 1.dp
+                Box(
+                    modifier = Modifier.size(mountedSize),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .alpha(if (shouldShowVideoPreviewOverlay) 1f else 0f),
+                        shape = CircleShape,
+                        colors = CardDefaults.cardColors(containerColor = Color.Black),
+                        border = BorderStroke(2.dp, Color.White.copy(alpha = if (shouldShowVideoPreviewOverlay) 0.92f else 0f)),
+                        elevation = CardDefaults.cardElevation(defaultElevation = if (shouldShowVideoPreviewOverlay) 10.dp else 0.dp)
+                    ) {
+                        ChatMediaRecorderPreview(
+                            recorder = mediaRecorder,
+                            state = recorderState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape)
+                        )
+                    }
+                    if (shouldShowVideoPreviewOverlay) {
+                        IconButton(
+                            onClick = { mediaRecorder.switchCamera() },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(18.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.42f))
+                                .zIndex(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Cameraswitch,
+                                contentDescription = "Сменить камеру",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         AnimatedVisibility(
@@ -1965,6 +2204,8 @@ fun ChatDetailScreen(
         ) {
             ChatAttachmentsBrowser(
                 mediaAttachments = mediaAttachmentEntries,
+                voiceAttachments = voiceNoteAttachmentEntries,
+                videoNoteAttachments = videoNoteAttachmentEntries,
                 fileAttachments = fileAttachmentEntries,
                 isLoading = areConversationAttachmentsLoading,
                 errorMessage = conversationAttachmentsError,
@@ -1998,7 +2239,7 @@ fun ChatDetailScreen(
                     selectedMessageForActions = null
                     editingMessage = message
                     replyToMessage = null
-                    pendingAttachments = emptyList()
+                    clearPendingAttachments()
                     showEmojiPicker = false
                     newMessage = TextFieldValue(
                         text = message.content,
@@ -2101,7 +2342,10 @@ private data class PendingAttachment(
     val contentType: String,
     val size: Long,
     val bytes: ByteArray,
-    val previewBytes: ByteArray?
+    val previewBytes: ByteArray?,
+    val localPath: String? = null,
+    val durationMillis: Long? = null,
+    val kind: ChatMediaCaptureMode? = null
 )
 
 private fun PendingAttachment.toOutgoingDraft(): OutgoingAttachmentDraft {
@@ -2557,6 +2801,8 @@ private fun buildAttachmentPreviewLabel(
     totalCount: Int = 1
 ): String {
     val baseLabel = when {
+        attachment.isVoiceNote() -> "Голосовое"
+        attachment.isVideoNote() -> "Кружок"
         attachment.contentType.startsWith("image/", ignoreCase = true) -> "Фото"
         attachment.contentType.startsWith("video/", ignoreCase = true) -> "Видео"
         attachment.contentType.startsWith("audio/", ignoreCase = true) -> "Аудио"
@@ -2615,8 +2861,25 @@ private fun formatFileSize(size: Long): String {
     }
 }
 
+private fun preferredAttachmentsTab(
+    mediaAttachments: List<ConversationAttachmentEntry>,
+    voiceAttachments: List<ConversationAttachmentEntry>,
+    videoNoteAttachments: List<ConversationAttachmentEntry>,
+    fileAttachments: List<ConversationAttachmentEntry>
+): ChatAttachmentsTab {
+    return when {
+        mediaAttachments.isNotEmpty() -> ChatAttachmentsTab.Media
+        voiceAttachments.isNotEmpty() -> ChatAttachmentsTab.VoiceNotes
+        videoNoteAttachments.isNotEmpty() -> ChatAttachmentsTab.VideoNotes
+        fileAttachments.isNotEmpty() -> ChatAttachmentsTab.Files
+        else -> ChatAttachmentsTab.Media
+    }
+}
+
 private enum class ChatAttachmentsTab {
     Media,
+    VoiceNotes,
+    VideoNotes,
     Files
 }
 
@@ -2636,11 +2899,20 @@ private data class ConversationAttachmentEntry(
     val isImage: Boolean
         get() = normalizedContentType.startsWith("image/")
 
+    val isVideoNote: Boolean
+        get() = attachment.isVideoNote()
+
+    val isVoiceNote: Boolean
+        get() = attachment.isVoiceNote()
+
     val isVideo: Boolean
-        get() = normalizedContentType.startsWith("video/")
+        get() = normalizedContentType.startsWith("video/") && !isVideoNote
 
     val isMedia: Boolean
         get() = isImage || isVideo
+
+    val isFile: Boolean
+        get() = !isMedia && !isVoiceNote && !isVideoNote
 }
 
 private fun ConversationAttachmentEntryDto.toConversationAttachmentEntry(
@@ -2694,6 +2966,8 @@ private fun formatAttachmentMetaLabel(instant: Instant?, fallback: String): Stri
 private const val TransferInviteTokenPrefix = "TRANSFER_CHANNEL_INVITE_TOKEN:"
 private const val TransferChannelIdPrefix = "TRANSFER_CHANNEL_ID:"
 private const val DraftConversationIdPrefix = "draft:"
+private const val VoiceNoteFilePrefix = "voice-note-"
+private const val VideoNoteFilePrefix = "video-note-"
 
 private val EmojiCategories = listOf(
     EmojiCategory(
@@ -2803,6 +3077,8 @@ private fun sanitizeInviteMetaLines(content: String): String {
 @Composable
 private fun ChatAttachmentsBrowser(
     mediaAttachments: List<ConversationAttachmentEntry>,
+    voiceAttachments: List<ConversationAttachmentEntry>,
+    videoNoteAttachments: List<ConversationAttachmentEntry>,
     fileAttachments: List<ConversationAttachmentEntry>,
     isLoading: Boolean,
     errorMessage: String?,
@@ -2818,7 +3094,12 @@ private fun ChatAttachmentsBrowser(
             .groupBy { formatAttachmentSectionLabel(it.sentAtInstant, it.sentAt) }
             .toList()
     }
-    val totalAttachments = mediaAttachments.size + fileAttachments.size
+    val groupedVideoNoteAttachments = remember(videoNoteAttachments) {
+        videoNoteAttachments
+            .groupBy { formatAttachmentSectionLabel(it.sentAtInstant, it.sentAt) }
+            .toList()
+    }
+    val totalAttachments = mediaAttachments.size + voiceAttachments.size + videoNoteAttachments.size + fileAttachments.size
 
     Card(
         modifier = modifier.fillMaxSize(),
@@ -2849,7 +3130,10 @@ private fun ChatAttachmentsBrowser(
                             }
                         } else {
                             buildString {
-                                append("Медиа: ${mediaAttachments.size} • Файлы: ${fileAttachments.size}")
+                                append("Медиа: ${mediaAttachments.size}")
+                                append(" • ГС: ${voiceAttachments.size}")
+                                append(" • Кружки: ${videoNoteAttachments.size}")
+                                append(" • Файлы: ${fileAttachments.size}")
                                 if (isLoading) {
                                     append(" • обновляем историю")
                                 }
@@ -2881,6 +3165,24 @@ private fun ChatAttachmentsBrowser(
                     text = {
                         Text(
                             text = if (mediaAttachments.isEmpty()) "Медиа" else "Медиа (${mediaAttachments.size})"
+                        )
+                    }
+                )
+                Tab(
+                    selected = selectedTab == ChatAttachmentsTab.VoiceNotes,
+                    onClick = { onSelectTab(ChatAttachmentsTab.VoiceNotes) },
+                    text = {
+                        Text(
+                            text = if (voiceAttachments.isEmpty()) "Голосовые" else "Голосовые (${voiceAttachments.size})"
+                        )
+                    }
+                )
+                Tab(
+                    selected = selectedTab == ChatAttachmentsTab.VideoNotes,
+                    onClick = { onSelectTab(ChatAttachmentsTab.VideoNotes) },
+                    text = {
+                        Text(
+                            text = if (videoNoteAttachments.isEmpty()) "Кружки" else "Кружки (${videoNoteAttachments.size})"
                         )
                     }
                 )
@@ -2934,6 +3236,71 @@ private fun ChatAttachmentsBrowser(
                                         key = { it.key }
                                     ) { entry ->
                                         ConversationMediaAttachmentTile(
+                                            entry = entry,
+                                            apiService = apiService,
+                                            token = token
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    ChatAttachmentsTab.VoiceNotes -> {
+                        if (voiceAttachments.isEmpty()) {
+                            AttachmentBrowserEmptyState(
+                                title = "Нет голосовых",
+                                subtitle = "Голосовые сообщения из чата появятся в этой вкладке."
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 20.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                items(
+                                    items = voiceAttachments,
+                                    key = { it.key }
+                                ) { entry ->
+                                    ConversationVoiceAttachmentRow(entry = entry)
+                                }
+                            }
+                        }
+                    }
+
+                    ChatAttachmentsTab.VideoNotes -> {
+                        if (videoNoteAttachments.isEmpty()) {
+                            AttachmentBrowserEmptyState(
+                                title = "Нет кружков",
+                                subtitle = "Видео кружки из чата появятся в этой вкладке."
+                            )
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Adaptive(minSize = 168.dp),
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                groupedVideoNoteAttachments.forEach { (sectionTitle, itemsForDate) ->
+                                    items(
+                                        count = 1,
+                                        span = { GridItemSpan(maxLineSpan) },
+                                        key = { "$sectionTitle-video-note-header" }
+                                    ) {
+                                        Text(
+                                            text = sectionTitle,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
+                                            modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
+                                        )
+                                    }
+                                    items(
+                                        items = itemsForDate,
+                                        key = { it.key }
+                                    ) { entry ->
+                                        ConversationVideoNoteAttachmentTile(
                                             entry = entry,
                                             apiService = apiService,
                                             token = token
@@ -3040,7 +3407,10 @@ private fun ConversationMediaAttachmentTile(
     } else {
         null
     }
-    val canOpen = (entry.isVideo && downloadState.isCached) || bitmap != null
+    val videoPreview = rememberVideoAttachmentPreview(
+        path = downloadState.cachedPath.takeIf { downloadState.isCached && entry.isVideo }
+    )
+    val canOpen = bitmap != null
     var showFull by remember(entry.key) { mutableStateOf(false) }
 
     Card(
@@ -3052,15 +3422,6 @@ private fun ConversationMediaAttachmentTile(
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             when {
-                entry.isVideo && downloadState.isCached -> {
-                    InlineVideo(
-                        path = downloadState.cachedPath,
-                        muted = true,
-                        modifier = Modifier.fillMaxSize(),
-                        onClick = { showFull = true }
-                    )
-                }
-
                 bitmap != null -> {
                     androidx.compose.foundation.Image(
                         bitmap = bitmap,
@@ -3070,6 +3431,24 @@ private fun ConversationMediaAttachmentTile(
                             .clickable { showFull = true },
                         contentScale = ContentScale.Crop
                     )
+                }
+
+                entry.isVideo -> {
+                    if (videoPreview != null) {
+                        androidx.compose.foundation.Image(
+                            bitmap = videoPreview,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        StaticAttachmentPreviewSurface(
+                            title = "Видео",
+                            tint = Color.White,
+                            backgroundColor = Color(0xFF0F172A),
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
 
                 downloadState.failed -> {
@@ -3148,26 +3527,231 @@ private fun ConversationMediaAttachmentTile(
         }
     }
 
-    if (showFull && canOpen) {
-        if (entry.isVideo) {
-            FullScreenVideo(
-                path = downloadState.cachedPath,
-                onDismiss = { showFull = false }
-            )
-        } else if (bitmap != null) {
-            ZoomableImage(
-                content = {
-                    androidx.compose.foundation.Image(
-                        bitmap = bitmap,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.Fit
+    if (showFull && bitmap != null) {
+        ZoomableImage(
+            content = {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentScale = ContentScale.Fit
+                )
+            },
+            onDismiss = { showFull = false }
+        )
+    }
+}
+
+@Composable
+private fun ConversationVideoNoteAttachmentTile(
+    entry: ConversationAttachmentEntry,
+    apiService: ApiService,
+    token: String?
+) {
+    val downloadState = rememberAttachmentDownloadState(
+        attachment = entry.attachment,
+        conversationId = entry.conversationId,
+        messageId = entry.messageId,
+        apiService = apiService,
+        token = token
+    )
+    val previewBitmap = rememberVideoAttachmentPreview(
+        path = downloadState.cachedPath.takeIf { downloadState.isCached }
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Color(0xFFE2E8F0))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF0F172A)),
+                contentAlignment = Alignment.Center
+            ) {
+                when {
+                    previewBitmap != null -> {
+                        androidx.compose.foundation.Image(
+                            bitmap = previewBitmap,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+
+                    downloadState.failed -> {
+                        StaticAttachmentPreviewSurface(
+                            title = "Кружок",
+                            tint = Color.White,
+                            backgroundColor = Color(0xFF334155),
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    downloadState.isCached -> {
+                        StaticAttachmentPreviewSurface(
+                            title = "Кружок",
+                            tint = Color.White,
+                            backgroundColor = Color(0xFF0F172A),
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+
+                    else -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        }
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color.Black.copy(alpha = 0.42f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "Кружок",
+                        fontSize = 11.sp,
+                        color = Color.White
                     )
-                },
-                onDismiss = { showFull = false }
+                }
+            }
+            Text(
+                text = entry.attachment.fileName.ifBlank { "Видео кружок" },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "${entry.senderLabel} • ${formatAttachmentMetaLabel(entry.sentAtInstant, entry.sentAt)}",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f)
             )
         }
     }
+}
+
+@Composable
+private fun ConversationVoiceAttachmentRow(
+    entry: ConversationAttachmentEntry
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.dp, Color(0xFFE2E8F0))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF4F6FF0)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Mic,
+                    contentDescription = null,
+                    tint = Color.White
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = entry.attachment.fileName.ifBlank { "Голосовое сообщение" },
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${formatFileSize(entry.attachment.size)} • ${entry.senderLabel}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f)
+                )
+                Text(
+                    text = formatAttachmentMetaLabel(entry.sentAtInstant, entry.sentAt),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StaticAttachmentPreviewSurface(
+    title: String,
+    tint: Color,
+    backgroundColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.background(backgroundColor),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = if (title == "Кружок") Icons.Filled.Videocam else Icons.Filled.PlayArrow,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(28.dp)
+            )
+            Text(
+                text = title,
+                fontSize = 12.sp,
+                color = tint.copy(alpha = 0.9f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun rememberVideoAttachmentPreview(path: String?): ImageBitmap? {
+    var previewBitmap by remember(path) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(path) {
+        previewBitmap = if (path.isNullOrBlank()) {
+            null
+        } else {
+            withContext(Dispatchers.Default) {
+                decodeVideoPreview(path)
+            }
+        }
+    }
+
+    return previewBitmap
 }
 
 @Composable
@@ -3584,8 +4168,20 @@ private fun MessageBubble(
         message.replyToMessageId != null -> "Исходное сообщение недоступно"
         else -> null
     }
+    val standaloneVideoNote = message.attachments.singleOrNull()?.takeIf { attachment ->
+        attachment.isVideoNote()
+    }
+    val isStandaloneVideoNote = standaloneVideoNote != null &&
+        messageText.isBlank() &&
+        replyPreview == null &&
+        !canOpenTransferInvite
+    val isCompactVoiceNote = message.attachments.singleOrNull()?.isVoiceNote() == true &&
+        messageText.isBlank() &&
+        replyPreview == null &&
+        !canOpenTransferInvite
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.78f
+        val bubbleMaxWidth = if (isCompactVoiceNote) minOf(maxBubbleWidth, 204.dp) else maxBubbleWidth
         val inlineMetaReserve = when {
             isOwn && message.editedAt != null -> 64.dp
             isOwn -> 52.dp
@@ -3606,11 +4202,92 @@ private fun MessageBubble(
         } else {
             Color(0xFFF7FAFD)
         }
+        val standaloneTextColor = Color(0xFF1F2937)
+        val standaloneMetaColor = Color(0xFF64748B)
         val showInlineMeta = message.attachments.isEmpty() && !canOpenTransferInvite && messageText.isNotBlank()
+        val interactionModifier = Modifier
+            .offset { IntOffset(animatedDragOffsetPx.roundToInt(), 0) }
+            .pointerInput(message.id) {
+                detectTapGestures(
+                    onLongPress = { onOpenActions(message) }
+                )
+            }
+            .pointerInput(message.id) {
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        hasTriggered = false
+                        isDragging = true
+                    },
+                    onDragEnd = {
+                        hasTriggered = false
+                        isDragging = false
+                        dragOffsetPx = 0f
+                    },
+                    onDragCancel = {
+                        hasTriggered = false
+                        isDragging = false
+                        dragOffsetPx = 0f
+                    },
+                    onHorizontalDrag = { _, dragAmount ->
+                        if (hasTriggered) return@detectHorizontalDragGestures
+
+                        val nextOffset = (dragOffsetPx + dragAmount)
+                            .coerceIn(-replySwipeTriggerOffsetPx, 0f)
+
+                        dragOffsetPx = nextOffset
+                        if (nextOffset <= -replySwipeTriggerOffsetPx) {
+                            hasTriggered = true
+                            isDragging = false
+                            onReply(message)
+                            dragOffsetPx = 0f
+                        }
+                    }
+                )
+            }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = if (isOwn) Arrangement.End else Arrangement.Start
         ) {
+            if (isStandaloneVideoNote) {
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = maxBubbleWidth)
+                        .then(interactionModifier),
+                    horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (showSenderName) {
+                        Text(
+                            text = resolveMessageAuthorLabel(message),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 11.sp,
+                            color = standaloneTextColor
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StandaloneVideoNoteAttachment(
+                            attachment = standaloneVideoNote,
+                            conversationId = message.conversationId,
+                            messageId = message.id,
+                            apiService = apiService,
+                            token = token,
+                            secondaryColor = standaloneMetaColor
+                        )
+                        MessageMetaRow(
+                            timeLabel = timeLabel,
+                            isOwn = isOwn,
+                            isRead = isRead,
+                            isEdited = message.editedAt != null,
+                            metaColor = standaloneMetaColor,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                }
+                return@Row
+            }
             val bubbleShape = if (isOwn) {
                 RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomEnd = 6.dp, bottomStart = 18.dp)
             } else {
@@ -3618,45 +4295,8 @@ private fun MessageBubble(
             }
             Card(
                 modifier = Modifier
-                    .widthIn(max = maxBubbleWidth)
-                    .offset { IntOffset(animatedDragOffsetPx.roundToInt(), 0) }
-                    .pointerInput(message.id) {
-                        detectTapGestures(
-                            onLongPress = { onOpenActions(message) }
-                        )
-                    }
-                    .pointerInput(message.id) {
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                hasTriggered = false
-                                isDragging = true
-                            },
-                            onDragEnd = {
-                                hasTriggered = false
-                                isDragging = false
-                                dragOffsetPx = 0f
-                            },
-                            onDragCancel = {
-                                hasTriggered = false
-                                isDragging = false
-                                dragOffsetPx = 0f
-                            },
-                            onHorizontalDrag = { _, dragAmount ->
-                                if (hasTriggered) return@detectHorizontalDragGestures
-
-                                val nextOffset = (dragOffsetPx + dragAmount)
-                                    .coerceIn(-replySwipeTriggerOffsetPx, 0f)
-
-                                dragOffsetPx = nextOffset
-                                if (nextOffset <= -replySwipeTriggerOffsetPx) {
-                                    hasTriggered = true
-                                    isDragging = false
-                                    onReply(message)
-                                    dragOffsetPx = 0f
-                                }
-                            }
-                        )
-                    },
+                    .widthIn(max = bubbleMaxWidth)
+                    .then(interactionModifier),
                 shape = bubbleShape,
                 colors = CardDefaults.cardColors(
                     containerColor = if (isOwn) colors.ownBubble else colors.otherBubble
@@ -3669,8 +4309,11 @@ private fun MessageBubble(
                 elevation = CardDefaults.cardElevation(defaultElevation = if (isHighlighted) 3.dp else 1.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                    modifier = Modifier.padding(
+                        horizontal = if (isCompactVoiceNote) 5.dp else 8.dp,
+                        vertical = if (isCompactVoiceNote) 5.dp else 6.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(if (isCompactVoiceNote) 2.dp else 3.dp)
                 ) {
                     if (showInlineMeta) {
                         Box {
@@ -3766,28 +4409,47 @@ private fun MessageBubble(
                     }
 
                     if (message.attachments.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            message.attachments.forEach { attachment ->
-                                AttachmentPreview(
-                                    attachment = attachment,
-                                    conversationId = message.conversationId,
-                                    messageId = message.id,
-                                    apiService = apiService,
-                                    token = token,
-                                    contentColor = if (isOwn) colors.ownText else colors.otherText,
-                                    secondaryColor = if (isOwn) colors.ownMeta else colors.otherMeta,
-                                    fileIconTint = if (isOwn) colors.ownText else Color(0xFF4566C7),
-                                    fileIconContainerColor = if (isOwn) {
-                                        Color.White.copy(alpha = 0.14f)
-                                    } else {
-                                        Color(0xFFEFF4FB)
-                                    }
-                                )
+                        if (isCompactVoiceNote) {
+                            CompactVoiceNoteAttachmentPreview(
+                                attachment = message.attachments.single(),
+                                conversationId = message.conversationId,
+                                messageId = message.id,
+                                apiService = apiService,
+                                token = token,
+                                timeLabel = timeLabel,
+                                isOwn = isOwn,
+                                isRead = isRead,
+                                isEdited = message.editedAt != null,
+                                metaColor = metaColor,
+                                contentColor = if (isOwn) colors.ownText else colors.otherText,
+                                secondaryColor = if (isOwn) colors.ownMeta else colors.otherMeta,
+                                metaReserve = inlineMetaReserve
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                message.attachments.forEach { attachment ->
+                                    AttachmentPreview(
+                                        attachment = attachment,
+                                        conversationId = message.conversationId,
+                                        messageId = message.id,
+                                        apiService = apiService,
+                                        token = token,
+                                        compact = false,
+                                        contentColor = if (isOwn) colors.ownText else colors.otherText,
+                                        secondaryColor = if (isOwn) colors.ownMeta else colors.otherMeta,
+                                        fileIconTint = if (isOwn) colors.ownText else Color(0xFF4566C7),
+                                        fileIconContainerColor = if (isOwn) {
+                                            Color.White.copy(alpha = 0.14f)
+                                        } else {
+                                            Color(0xFFEFF4FB)
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
 
-                    if (message.attachments.isNotEmpty() || canOpenTransferInvite || messageText.isBlank()) {
+                    if (!isCompactVoiceNote && (message.attachments.isNotEmpty() || canOpenTransferInvite || messageText.isBlank())) {
                         MessageMetaRow(
                             timeLabel = timeLabel,
                             isOwn = isOwn,
@@ -3805,18 +4467,82 @@ private fun MessageBubble(
 }
 
 @Composable
+private fun CompactVoiceNoteAttachmentPreview(
+    attachment: MessageAttachmentDto,
+    conversationId: String,
+    messageId: String,
+    apiService: ApiService,
+    token: String?,
+    timeLabel: String,
+    isOwn: Boolean,
+    isRead: Boolean,
+    isEdited: Boolean,
+    metaColor: Color,
+    contentColor: Color,
+    secondaryColor: Color,
+    metaReserve: androidx.compose.ui.unit.Dp
+) {
+    val downloadState = rememberAttachmentDownloadState(
+        attachment = attachment,
+        conversationId = conversationId,
+        messageId = messageId,
+        apiService = apiService,
+        token = token
+    )
+
+    Box {
+        when {
+            downloadState.isCached -> AudioAttachmentPlayer(
+                path = downloadState.cachedPath,
+                accentColor = Color(0xFF4F6FF0),
+                contentColor = contentColor,
+                secondaryColor = secondaryColor,
+                compact = true,
+                modifier = Modifier.padding(end = metaReserve)
+            )
+            downloadState.failed -> Text(
+                text = "Не удалось загрузить голосовое",
+                fontSize = 12.sp,
+                color = secondaryColor,
+                modifier = Modifier.padding(end = metaReserve)
+            )
+            else -> Text(
+                text = "Загрузка голосового...",
+                fontSize = 12.sp,
+                color = secondaryColor,
+                modifier = Modifier.padding(end = metaReserve)
+            )
+        }
+
+        MessageMetaRow(
+            timeLabel = timeLabel,
+            isOwn = isOwn,
+            isRead = isRead,
+            isEdited = isEdited,
+            metaColor = metaColor,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 1.dp, bottom = 2.dp)
+        )
+    }
+}
+
+@Composable
 private fun AttachmentPreview(
     attachment: MessageAttachmentDto,
     conversationId: String,
     messageId: String,
     apiService: ApiService,
     token: String?,
+    compact: Boolean,
     contentColor: Color,
     secondaryColor: Color,
     fileIconTint: Color,
     fileIconContainerColor: Color
 ) {
     val normalizedType = attachment.contentType.lowercase()
+    val isVoiceNote = attachment.isVoiceNote()
+    val isVideoNote = attachment.isVideoNote()
     val isImage = normalizedType.startsWith("image/")
     val isVideo = normalizedType.startsWith("video/")
     val openFile = rememberFileOpener()
@@ -3830,7 +4556,45 @@ private fun AttachmentPreview(
     var showFull by remember(attachment.id, messageId) { mutableStateOf(false) }
     var openFailed by remember(attachment.id, messageId) { mutableStateOf(false) }
 
-    if (isVideo) {
+    if (isVideoNote) {
+        when {
+            downloadState.isCached -> VideoNoteAttachmentPreview(
+                path = downloadState.cachedPath,
+                modifier = Modifier.size(168.dp)
+            )
+            downloadState.failed -> Text(
+                text = "Не удалось загрузить кружок",
+                fontSize = 12.sp,
+                color = secondaryColor
+            )
+            else -> Text(
+                text = "Загрузка кружка...",
+                fontSize = 12.sp,
+                color = secondaryColor
+            )
+        }
+    } else if (isVoiceNote) {
+        when {
+            downloadState.isCached -> AudioAttachmentPlayer(
+                path = downloadState.cachedPath,
+                accentColor = Color(0xFF4F6FF0),
+                contentColor = contentColor,
+                secondaryColor = secondaryColor,
+                compact = compact,
+                modifier = if (compact) Modifier else Modifier.fillMaxWidth()
+            )
+            downloadState.failed -> Text(
+                text = "Не удалось загрузить голосовое",
+                fontSize = 12.sp,
+                color = secondaryColor
+            )
+            else -> Text(
+                text = "Загрузка голосового...",
+                fontSize = 12.sp,
+                color = secondaryColor
+            )
+        }
+    } else if (isVideo) {
         when {
             downloadState.isCached -> InlineVideo(
                 path = downloadState.cachedPath,
@@ -3963,5 +4727,379 @@ private fun AttachmentPreview(
 
         }
     }
+}
+
+@Composable
+private fun StandaloneVideoNoteAttachment(
+    attachment: MessageAttachmentDto,
+    conversationId: String,
+    messageId: String,
+    apiService: ApiService,
+    token: String?,
+    secondaryColor: Color
+) {
+    val downloadState = rememberAttachmentDownloadState(
+        attachment = attachment,
+        conversationId = conversationId,
+        messageId = messageId,
+        apiService = apiService,
+        token = token
+    )
+
+    when {
+        downloadState.isCached -> VideoNoteAttachmentPreview(
+            path = downloadState.cachedPath,
+            baseSize = 168.dp
+        )
+        downloadState.failed -> Text(
+            text = "Не удалось загрузить кружок",
+            fontSize = 12.sp,
+            color = secondaryColor
+        )
+        else -> Text(
+            text = "Загрузка кружка...",
+            fontSize = 12.sp,
+            color = secondaryColor
+        )
+    }
+}
+
+@Composable
+private fun VideoNoteAttachmentPreview(
+    path: String,
+    baseSize: androidx.compose.ui.unit.Dp = 168.dp,
+    modifier: Modifier = Modifier
+) {
+    var isFocusedPlayback by remember(path) { mutableStateOf(false) }
+    var restartToken by remember(path) { mutableStateOf(0) }
+    val animatedSize by animateDpAsState(
+        targetValue = if (isFocusedPlayback) baseSize * 1.2f else baseSize,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "videoNoteSize"
+    )
+
+    Box(
+        modifier = modifier
+            .size(animatedSize)
+            .zIndex(if (isFocusedPlayback) 1f else 0f)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.08f))
+            .clickable {
+                isFocusedPlayback = !isFocusedPlayback
+                restartToken += 1
+            }
+    ) {
+        VideoPlayerView(
+            path = path,
+            muted = !isFocusedPlayback,
+            scaleMode = VideoPlayerScaleMode.Crop,
+            playbackMode = if (isFocusedPlayback) {
+                VideoPlayerPlaybackMode.PlayOnce
+            } else {
+                VideoPlayerPlaybackMode.Loop
+            },
+            restartToken = restartToken,
+            onPlaybackComplete = {
+                isFocusedPlayback = false
+                restartToken += 1
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+@Composable
+private fun RecordActionButton(
+    mode: ChatMediaCaptureMode,
+    accentColor: Color,
+    canToggleMode: Boolean,
+    onToggleMode: () -> Unit,
+    onStartRecording: () -> Unit,
+    onLockRecording: () -> Unit,
+    onRelease: () -> Unit
+) {
+    val density = LocalDensity.current
+    val viewConfiguration = LocalViewConfiguration.current
+    val lockThresholdPx = with(density) { 72.dp.toPx() }
+
+    Box(
+        modifier = Modifier
+            .size(52.dp)
+            .clip(CircleShape)
+            .background(accentColor)
+            .pointerInput(mode) {
+                awaitEachGesture {
+                    val downEvent = awaitPointerEvent()
+                    val down = downEvent.changes.firstOrNull { it.pressed } ?: return@awaitEachGesture
+                    var started = false
+                    var locked = false
+                    val longPressTimeout = viewConfiguration.longPressTimeoutMillis.toLong()
+                    val downTime = down.uptimeMillis
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        val elapsedSinceDown = change.uptimeMillis - downTime
+                        if (!started && elapsedSinceDown > longPressTimeout) {
+                            started = true
+                            onStartRecording()
+                        }
+                        val movedUpBy = down.position.y - change.position.y
+                        if (started && !locked && movedUpBy > lockThresholdPx) {
+                            locked = true
+                            onLockRecording()
+                        }
+
+                        if (!change.pressed) {
+                            if (started) {
+                                if (!locked) {
+                                    onRelease()
+                                }
+                            } else if (canToggleMode) {
+                                onToggleMode()
+                            }
+                            break
+                        }
+                        change.consume()
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = if (mode == ChatMediaCaptureMode.VoiceNote) {
+                Icons.Filled.Mic
+            } else {
+                Icons.Filled.Videocam
+            },
+            contentDescription = if (mode == ChatMediaCaptureMode.VoiceNote) {
+                "Записать голосовое"
+            } else {
+                "Записать кружок"
+            },
+            tint = Color.White
+        )
+    }
+}
+
+@Composable
+private fun MediaRecorderPanel(
+    state: ChatMediaRecorderUiState,
+    accentColor: Color,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onSend: () -> Unit,
+    onDiscard: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(if (state.isRecording) Color(0xFFE53935) else accentColor.copy(alpha = 0.24f))
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = when (state.selectedMode) {
+                        ChatMediaCaptureMode.VoiceNote -> "Голосовое сообщение"
+                        ChatMediaCaptureMode.VideoNote -> "Видео кружок"
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = when {
+                        state.isRecording && !state.isLocked -> "Потяните вверх, чтобы закрепить запись"
+                        state.isRecording -> "Запись продолжается"
+                        state.isPaused -> "Можно возобновить или отправить"
+                        else -> "Подготавливаем файл..."
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
+            Text(
+                text = formatDurationMillis(state.durationMillis),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = accentColor
+            )
+        }
+
+        when {
+            state.isFinalizing -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = accentColor,
+                        strokeWidth = 2.dp
+                    )
+                    Text(
+                        text = "Готовим запись к отправке",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f)
+                    )
+                }
+            }
+
+            state.isPaused -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onDiscard,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Delete,
+                            contentDescription = "Удалить запись"
+                        )
+                    }
+                    Button(
+                        onClick = onResume,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = accentColor.copy(alpha = 0.16f),
+                            contentColor = accentColor
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.PlayArrow,
+                            contentDescription = "Возобновить запись"
+                        )
+                    }
+                    Button(
+                        onClick = onSend,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = accentColor,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Отправить запись"
+                        )
+                    }
+                }
+            }
+
+            state.isRecording -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onDiscard,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Delete,
+                            contentDescription = "Отменить запись"
+                        )
+                    }
+                    Button(
+                        onClick = onPause,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = accentColor,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (state.isLocked) Icons.Filled.Stop else Icons.Filled.Pause,
+                            contentDescription = "Остановить запись"
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (state.isLocked) "Стоп" else "Пауза"
+                        )
+                    }
+                    if (state.isLocked) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(accentColor.copy(alpha = 0.12f))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Lock,
+                                contentDescription = "Запись закреплена",
+                                tint = accentColor
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun detectRecordedAttachmentKind(
+    fileName: String,
+    contentType: String
+): ChatMediaCaptureMode? {
+    val normalizedName = fileName.lowercase()
+    return when {
+        contentType.startsWith("audio/", ignoreCase = true) && normalizedName.startsWith(VoiceNoteFilePrefix) -> {
+            ChatMediaCaptureMode.VoiceNote
+        }
+        contentType.startsWith("video/", ignoreCase = true) && normalizedName.startsWith(VideoNoteFilePrefix) -> {
+            ChatMediaCaptureMode.VideoNote
+        }
+        else -> null
+    }
+}
+
+private fun MessageAttachmentDto.isVoiceNote(): Boolean {
+    return detectRecordedAttachmentKind(fileName, contentType) == ChatMediaCaptureMode.VoiceNote
+}
+
+private fun MessageAttachmentDto.isVideoNote(): Boolean {
+    return detectRecordedAttachmentKind(fileName, contentType) == ChatMediaCaptureMode.VideoNote
+}
+
+private fun buildAttachmentMetaLabel(
+    title: String,
+    durationMillis: Long?,
+    size: Long
+): String {
+    return buildString {
+        append(title)
+        durationMillis?.let {
+            append(" • ")
+            append(formatDurationMillis(it))
+        }
+        append(" • ")
+        append(formatFileSize(size))
+    }
+}
+
+private fun formatDurationMillis(value: Long?): String {
+    val safeValue = (value ?: 0L).coerceAtLeast(0L)
+    val totalSeconds = safeValue / 1000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}"
 }
 

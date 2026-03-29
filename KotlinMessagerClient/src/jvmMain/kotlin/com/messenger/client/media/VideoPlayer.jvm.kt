@@ -1,22 +1,14 @@
 package com.messenger.client.media
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.swing.SwingUtilities
 import javafx.application.Platform
 import javafx.embed.swing.JFXPanel
 import javafx.scene.Scene
@@ -24,66 +16,58 @@ import javafx.scene.layout.StackPane
 import javafx.scene.media.Media
 import javafx.scene.media.MediaPlayer
 import javafx.scene.media.MediaView
+import javafx.util.Duration
 
 @Composable
 actual fun VideoPlayerView(
     path: String,
     muted: Boolean,
+    scaleMode: VideoPlayerScaleMode,
+    playbackMode: VideoPlayerPlaybackMode,
+    restartToken: Int,
+    onPlaybackComplete: (() -> Unit)?,
     modifier: Modifier
 ) {
-    if (muted) {
-        Box(
-            modifier = modifier
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "Видео",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        return
-    }
-
     ensureFxStarted()
-    var showPlayer by remember(path) { mutableStateOf(false) }
-    LaunchedEffect(path) {
-        showPlayer = true
-    }
-
-    if (!showPlayer) {
-        Box(
-            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "Видео",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        return
-    }
     val panel = remember { JFXPanel() }
     val playerHolder = remember { arrayOfNulls<MediaPlayer>(1) }
 
-    DisposableEffect(path, muted) {
+    DisposableEffect(path, muted, scaleMode, playbackMode, restartToken) {
         Platform.runLater {
-            playerHolder[0]?.dispose()
-            val media = Media(File(path).toURI().toString())
-            val player = MediaPlayer(media)
-            player.isMute = muted
-            player.isAutoPlay = true
-            player.cycleCount = MediaPlayer.INDEFINITE
-            val view = MediaView(player)
-            view.isPreserveRatio = true
-            val root = StackPane(view)
-            val scene = Scene(root)
-            view.fitWidthProperty().bind(scene.widthProperty())
-            view.fitHeightProperty().bind(scene.heightProperty())
-            panel.scene = scene
-            playerHolder[0] = player
-            player.play()
+            runCatching {
+                playerHolder[0]?.dispose()
+                val media = Media(File(path).toURI().toString())
+                val player = MediaPlayer(media).apply {
+                    isMute = muted
+                    cycleCount = if (playbackMode == VideoPlayerPlaybackMode.Loop) {
+                        MediaPlayer.INDEFINITE
+                    } else {
+                        1
+                    }
+                    setOnEndOfMedia {
+                        if (playbackMode == VideoPlayerPlaybackMode.PlayOnce) {
+                            SwingUtilities.invokeLater {
+                                onPlaybackComplete?.invoke()
+                            }
+                        }
+                    }
+                }
+                val view = MediaView(player).apply {
+                    isPreserveRatio = scaleMode == VideoPlayerScaleMode.Fit
+                }
+                val scene = Scene(StackPane(view))
+                view.fitWidthProperty().bind(scene.widthProperty())
+                view.fitHeightProperty().bind(scene.heightProperty())
+                panel.scene = scene
+                playerHolder[0] = player
+                player.seek(Duration.ZERO)
+                player.play()
+            }.onFailure {
+                panel.scene = null
+                playerHolder[0] = null
+            }
         }
+
         onDispose {
             Platform.runLater {
                 playerHolder[0]?.stop()

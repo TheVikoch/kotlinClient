@@ -19,6 +19,16 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 
+enum class VideoPlayerScaleMode {
+    Fit,
+    Crop
+}
+
+enum class VideoPlayerPlaybackMode {
+    Loop,
+    PlayOnce
+}
+
 @Composable
 fun InlineVideo(
     path: String,
@@ -33,7 +43,15 @@ fun InlineVideo(
             .then(modifier)
             .clickable { onClick() }
     ) {
-        VideoPlayerView(path = path, muted = muted, modifier = Modifier.fillMaxSize())
+        VideoPlayerView(
+            path = path,
+            muted = muted,
+            scaleMode = VideoPlayerScaleMode.Fit,
+            playbackMode = VideoPlayerPlaybackMode.Loop,
+            restartToken = 0,
+            onPlaybackComplete = null,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
 
@@ -61,7 +79,15 @@ fun FullScreenVideo(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                VideoPlayerView(path = path, muted = false, modifier = Modifier.fillMaxSize())
+                VideoPlayerView(
+                    path = path,
+                    muted = false,
+                    scaleMode = VideoPlayerScaleMode.Fit,
+                    playbackMode = VideoPlayerPlaybackMode.Loop,
+                    restartToken = 0,
+                    onPlaybackComplete = null,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
     }
@@ -123,5 +149,9 @@ private fun rememberTransformState(): TransformState {
 expect fun VideoPlayerView(
     path: String,
     muted: Boolean,
+    scaleMode: VideoPlayerScaleMode,
+    playbackMode: VideoPlayerPlaybackMode,
+    restartToken: Int,
+    onPlaybackComplete: (() -> Unit)?,
     modifier: Modifier
 )
