@@ -90,6 +90,8 @@ private class DesktopChatMediaRecorder(
 
     override fun switchCamera() = Unit
 
+    override fun setVideoZoom(normalizedZoom: Float) = Unit
+
     override fun beginCapture() {
         if (!state.value.isIdle) return
         if (state.value.selectedMode != ChatMediaCaptureMode.VoiceNote) {

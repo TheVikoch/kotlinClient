@@ -1,6 +1,7 @@
 ﻿package com.messenger.client.ui.screens.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -16,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
@@ -157,6 +159,7 @@ import com.messenger.client.ui.components.CachedUserProfilePhoto
 import com.messenger.client.ui.components.TypingIndicatorText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -253,16 +256,16 @@ fun ChatDetailScreen(
     val isDraftConversation = conversationState.id.startsWith(DraftConversationIdPrefix)
     val listState = rememberLazyListState()
     val chatMessagesCache = rememberChatMessagesCache()
-    val chatBackground = Color(0xFFF6F7FB)
+    val chatBackground = Color(0xFFF9F9FC)
     val chatAccent = Color(0xFF4F6FF0)
     val bubbleColors = ChatBubbleColors(
         ownBubble = chatAccent,
         otherBubble = Color.White,
         ownText = Color.White,
-        otherText = Color(0xFF1F2937),
-        ownMeta = Color.White.copy(alpha = 0.72f),
-        otherMeta = Color(0xFF64748B),
-        bubbleBorder = Color(0xFFE2E8F0),
+        otherText = Color(0xFF050505),
+        ownMeta = Color.White.copy(alpha = 0.8f),
+        otherMeta = Color(0xFF050505).copy(alpha = 0.72f),
+        bubbleBorder = Color(0xFFDDE3EB),
         replyAccent = chatAccent
     )
     val messagesById = remember(messages) { messages.associateBy { it.id } }
@@ -1464,6 +1467,16 @@ fun ChatDetailScreen(
             recorderState.selectedMode == ChatMediaCaptureMode.VideoNote
         val shouldShowVideoPreviewOverlay = shouldKeepVideoPreviewMounted &&
             (recorderState.isRecording || recorderState.isPaused)
+        var previewZoomNormalized by remember(recorderState.selectedMode) { mutableStateOf(0f) }
+        var previewZoomResetJob by remember(recorderState.selectedMode) { mutableStateOf<Job?>(null) }
+        LaunchedEffect(recorderState.selectedMode, recorderState.selectedCameraLens, recorderState.phase) {
+            if (!shouldShowVideoPreviewOverlay || recorderState.selectedMode != ChatMediaCaptureMode.VideoNote) {
+                previewZoomResetJob?.cancel()
+                previewZoomResetJob = null
+                previewZoomNormalized = 0f
+                mediaRecorder.setVideoZoom(0f)
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -2161,6 +2174,41 @@ fun ChatDetailScreen(
                     Card(
                         modifier = Modifier
                             .fillMaxSize()
+                            .pointerInput(recorderState.selectedCameraLens, recorderState.phase) {
+                                awaitEachGesture {
+                                    var hadZoom = false
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val zoomChange = event.calculateZoom()
+                                        if (zoomChange != 1f) {
+                                            hadZoom = true
+                                            previewZoomResetJob?.cancel()
+                                            previewZoomResetJob = null
+                                            val nextZoom = (previewZoomNormalized + (zoomChange - 1f) * 0.35f)
+                                                .coerceIn(0f, 1f)
+                                            if (nextZoom != previewZoomNormalized) {
+                                                previewZoomNormalized = nextZoom
+                                                mediaRecorder.setVideoZoom(nextZoom)
+                                            }
+                                        }
+                                    } while (event.changes.any { it.pressed })
+
+                                    if (hadZoom && previewZoomNormalized > 0f) {
+                                        previewZoomResetJob?.cancel()
+                                        previewZoomResetJob = scope.launch {
+                                            val zoomBack = Animatable(previewZoomNormalized)
+                                            zoomBack.animateTo(
+                                                targetValue = 0f,
+                                                animationSpec = tween(durationMillis = 220)
+                                            ) {
+                                                previewZoomNormalized = value
+                                                mediaRecorder.setVideoZoom(value)
+                                            }
+                                            previewZoomResetJob = null
+                                        }
+                                    }
+                                }
+                            }
                             .alpha(if (shouldShowVideoPreviewOverlay) 1f else 0f),
                         shape = CircleShape,
                         colors = CardDefaults.cardColors(containerColor = Color.Black),
@@ -4202,8 +4250,8 @@ private fun MessageBubble(
         } else {
             Color(0xFFF7FAFD)
         }
-        val standaloneTextColor = Color(0xFF1F2937)
-        val standaloneMetaColor = Color(0xFF64748B)
+        val standaloneTextColor = Color(0xFF050505)
+        val standaloneMetaColor = Color(0xFF050505).copy(alpha = 0.72f)
         val showInlineMeta = message.attachments.isEmpty() && !canOpenTransferInvite && messageText.isNotBlank()
         val interactionModifier = Modifier
             .offset { IntOffset(animatedDragOffsetPx.roundToInt(), 0) }
@@ -4773,7 +4821,7 @@ private fun VideoNoteAttachmentPreview(
     var isFocusedPlayback by remember(path) { mutableStateOf(false) }
     var restartToken by remember(path) { mutableStateOf(0) }
     val animatedSize by animateDpAsState(
-        targetValue = if (isFocusedPlayback) baseSize * 1.2f else baseSize,
+        targetValue = if (isFocusedPlayback) baseSize * 1.5f else baseSize,
         animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
         label = "videoNoteSize"
     )

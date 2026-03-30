@@ -60,6 +60,8 @@ interface ChatMediaRecorder {
 
     fun switchCamera()
 
+    fun setVideoZoom(normalizedZoom: Float)
+
     fun beginCapture()
 
     fun lockCapture()

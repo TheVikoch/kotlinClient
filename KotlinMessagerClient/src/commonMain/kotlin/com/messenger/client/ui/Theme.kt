@@ -1,6 +1,5 @@
 package com.messenger.client.ui
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -11,14 +10,14 @@ private val LightColorScheme = lightColorScheme(
     primary = Color(0xFF0F766E),
     secondary = Color(0xFF0EA5E9),
     tertiary = Color(0xFFF59E0B),
-    background = Color(0xFFF7F7F9),
+    background = Color(0xFFF9F9FB),
     surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFF1F5F9),
+    surfaceVariant = Color(0xFFF3F4F6),
     onPrimary = Color(0xFFFFFFFF),
     onSecondary = Color(0xFFFFFFFF),
-    onTertiary = Color(0xFF1F2937),
-    onBackground = Color(0xFF0F172A),
-    onSurface = Color(0xFF0F172A),
+    onTertiary = Color(0xFF050505),
+    onBackground = Color(0xFF050505),
+    onSurface = Color(0xFF050505),
     outline = Color(0xFFE2E8F0),
     error = Color(0xFFDC2626)
 )
@@ -41,7 +40,7 @@ private val DarkColorScheme = darkColorScheme(
 
 @Composable
 fun MessengerTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme

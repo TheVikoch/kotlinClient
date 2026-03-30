@@ -1,15 +1,30 @@
 package com.messenger.client.media
 
-import android.graphics.Matrix
-import android.graphics.SurfaceTexture
-import android.media.MediaPlayer
-import android.view.Surface
-import android.view.TextureView
-import android.widget.VideoView
+import android.graphics.Color as AndroidColor
+import android.media.MediaExtractor
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.view.LayoutInflater
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.messenger.client.R
+import java.io.File
 
 @Composable
 actual fun VideoPlayerView(
@@ -21,239 +36,139 @@ actual fun VideoPlayerView(
     onPlaybackComplete: (() -> Unit)?,
     modifier: Modifier
 ) {
-    key(path, muted, scaleMode, playbackMode, restartToken) {
-        when (scaleMode) {
-            VideoPlayerScaleMode.Fit -> {
-                AndroidView(
-                    modifier = modifier,
-                    factory = { context ->
-                        LoopingVideoView(context).apply {
-                            bind(
-                                path = path,
-                                muted = muted,
-                                playbackMode = playbackMode,
-                                onPlaybackComplete = onPlaybackComplete
-                            )
-                        }
-                    },
-                    update = { view ->
-                        view.bind(
-                            path = path,
-                            muted = muted,
-                            playbackMode = playbackMode,
-                            onPlaybackComplete = onPlaybackComplete
-                        )
-                    }
-                )
-            }
-
-            VideoPlayerScaleMode.Crop -> {
-                AndroidView(
-                    modifier = modifier,
-                    factory = { context ->
-                        CropVideoTextureView(context).apply {
-                            bind(
-                                path = path,
-                                muted = muted,
-                                playbackMode = playbackMode,
-                                onPlaybackComplete = onPlaybackComplete
-                            )
-                        }
-                    },
-                    update = { view ->
-                        view.bind(
-                            path = path,
-                            muted = muted,
-                            playbackMode = playbackMode,
-                            onPlaybackComplete = onPlaybackComplete
-                        )
-                    }
-                )
-            }
-        }
-    }
-}
-
-private class LoopingVideoView(context: android.content.Context) : VideoView(context) {
-    private var mediaPlayer: MediaPlayer? = null
-    private var boundPath: String? = null
-    private var playbackMode: VideoPlayerPlaybackMode = VideoPlayerPlaybackMode.Loop
-    private var completionCallback: (() -> Unit)? = null
-
-    init {
-        setOnPreparedListener { mp ->
-            mediaPlayer = mp
-            applyPlayerConfig()
-            if (!isPlaying) {
-                start()
-            }
-        }
-        setOnCompletionListener {
-            if (playbackMode == VideoPlayerPlaybackMode.PlayOnce) {
-                post { completionCallback?.invoke() }
-            }
-        }
-        setOnErrorListener { _, _, _ -> true }
-    }
-
-    fun bind(
-        path: String,
-        muted: Boolean,
-        playbackMode: VideoPlayerPlaybackMode,
-        onPlaybackComplete: (() -> Unit)?
-    ) {
-        tag = muted
-        this.playbackMode = playbackMode
-        completionCallback = onPlaybackComplete
-        if (boundPath != path) {
-            boundPath = path
-            setVideoPath(path)
-        }
-        applyPlayerConfig()
-        if (!isPlaying) {
-            start()
-        }
-    }
-
-    private fun applyPlayerConfig() {
-        mediaPlayer?.isLooping = playbackMode == VideoPlayerPlaybackMode.Loop
-        val volume = if ((tag as? Boolean) == true) 0f else 1f
-        mediaPlayer?.setVolume(volume, volume)
-    }
-}
-
-private class CropVideoTextureView(
-    context: android.content.Context
-) : TextureView(context), TextureView.SurfaceTextureListener {
-    private var mediaPlayer: MediaPlayer? = null
-    private var surface: Surface? = null
-    private var boundPath: String? = null
-    private var pendingPath: String? = null
-    private var pendingMuted: Boolean = true
-    private var pendingPlaybackMode: VideoPlayerPlaybackMode = VideoPlayerPlaybackMode.Loop
-    private var completionCallback: (() -> Unit)? = null
-    private var videoWidth: Int = 0
-    private var videoHeight: Int = 0
-
-    init {
-        surfaceTextureListener = this
-        isOpaque = false
-    }
-
-    fun bind(
-        path: String,
-        muted: Boolean,
-        playbackMode: VideoPlayerPlaybackMode,
-        onPlaybackComplete: (() -> Unit)?
-    ) {
-        pendingMuted = muted
-        pendingPlaybackMode = playbackMode
-        completionCallback = onPlaybackComplete
-        if (!isAvailable) {
-            pendingPath = path
-            return
-        }
-        if (boundPath != path || mediaPlayer == null) {
-            startPlayback(path)
+    val context = LocalContext.current
+    val latestOnPlaybackComplete = rememberUpdatedState(onPlaybackComplete)
+    val mediaFile = remember(path) { File(path) }
+    val mediaUri = remember(mediaFile) { Uri.fromFile(mediaFile) }
+    val manualRotationDegrees = remember(path, scaleMode) {
+        if (scaleMode == VideoPlayerScaleMode.Crop) {
+            readVideoRotationDegrees(path)?.normalizeRotationDegrees() ?: 0
         } else {
-            applyPlayerConfig()
-            applyCropTransform()
+            0
         }
     }
-
-    override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-        surface = Surface(surfaceTexture)
-        val pathToPlay = pendingPath ?: boundPath
-        if (!pathToPlay.isNullOrBlank()) {
-            startPlayback(pathToPlay)
-        }
-    }
-
-    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-        applyCropTransform()
-    }
-
-    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-        releasePlayer()
-        this.surface?.release()
-        this.surface = null
-        return true
-    }
-
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
-
-    private fun startPlayback(path: String) {
-        val renderSurface = surface ?: return
-        releasePlayer()
-        boundPath = path
-        pendingPath = path
-        videoWidth = 0
-        videoHeight = 0
-
-        mediaPlayer = MediaPlayer().apply {
-            setSurface(renderSurface)
-            setDataSource(path)
-            setOnPreparedListener { player ->
-                this@CropVideoTextureView.videoWidth = player.videoWidth
-                this@CropVideoTextureView.videoHeight = player.videoHeight
-                applyPlayerConfig()
-                applyCropTransform()
-                player.start()
+    val exoPlayer = remember(context, mediaUri) {
+        ExoPlayer.Builder(context)
+            .build()
+            .apply {
+                setMediaItem(MediaItem.fromUri(mediaUri))
+                prepare()
+                playWhenReady = true
             }
-            setOnVideoSizeChangedListener { _, width, height ->
-                this@CropVideoTextureView.videoWidth = width
-                this@CropVideoTextureView.videoHeight = height
-                applyCropTransform()
-            }
-            setOnCompletionListener {
-                if (pendingPlaybackMode == VideoPlayerPlaybackMode.PlayOnce) {
-                    post { completionCallback?.invoke() }
+    }
+    var completionDispatched by remember(exoPlayer) { mutableStateOf(false) }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED &&
+                    exoPlayer.repeatMode == Player.REPEAT_MODE_OFF &&
+                    !completionDispatched
+                ) {
+                    completionDispatched = true
+                    latestOnPlaybackComplete.value?.invoke()
                 }
             }
-            setOnErrorListener { _, _, _ -> true }
-            prepareAsync()
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
         }
     }
 
-    private fun applyPlayerConfig() {
-        mediaPlayer?.isLooping = pendingPlaybackMode == VideoPlayerPlaybackMode.Loop
-        val volume = if (pendingMuted) 0f else 1f
-        mediaPlayer?.setVolume(volume, volume)
+    LaunchedEffect(exoPlayer, muted, playbackMode) {
+        exoPlayer.volume = if (muted) 0f else 1f
+        exoPlayer.repeatMode = when (playbackMode) {
+            VideoPlayerPlaybackMode.Loop -> Player.REPEAT_MODE_ONE
+            VideoPlayerPlaybackMode.PlayOnce -> Player.REPEAT_MODE_OFF
+        }
+        if (!exoPlayer.isPlaying) {
+            exoPlayer.playWhenReady = true
+            exoPlayer.play()
+        }
     }
 
-    private fun applyCropTransform() {
-        val currentWidth = width.toFloat()
-        val currentHeight = height.toFloat()
-        if (currentWidth <= 0f || currentHeight <= 0f || videoWidth <= 0 || videoHeight <= 0) {
-            return
-        }
+    LaunchedEffect(exoPlayer, restartToken, playbackMode) {
+        completionDispatched = false
+        exoPlayer.seekTo(0)
+        exoPlayer.playWhenReady = true
+        exoPlayer.play()
+    }
 
-        val viewAspect = currentWidth / currentHeight
-        val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
-        val scaleX: Float
-        val scaleY: Float
-        if (videoAspect > viewAspect) {
-            scaleX = videoAspect / viewAspect
-            scaleY = 1f
-        } else {
-            scaleX = 1f
-            scaleY = viewAspect / videoAspect
-        }
-
-        setTransform(
-            Matrix().apply {
-                setScale(scaleX, scaleY, currentWidth / 2f, currentHeight / 2f)
+    key(path, scaleMode) {
+        AndroidView(
+            modifier = modifier.graphicsLayer(
+                rotationZ = manualRotationDegrees.toFloat()
+            ),
+            factory = { viewContext ->
+                (LayoutInflater.from(viewContext)
+                    .inflate(R.layout.media3_texture_player_view, null, false) as PlayerView).apply {
+                    useController = false
+                    player = exoPlayer
+                    setShutterBackgroundColor(AndroidColor.TRANSPARENT)
+                    resizeMode = resolveResizeMode(scaleMode)
+                    enableComposeSurfaceSyncWorkaroundIfAvailable()
+                }
+            },
+            update = { playerView ->
+                playerView.player = exoPlayer
+                playerView.resizeMode = resolveResizeMode(scaleMode)
             }
         )
     }
+}
 
-    private fun releasePlayer() {
-        runCatching {
-            mediaPlayer?.stop()
-        }
-        runCatching {
-            mediaPlayer?.release()
-        }
-        mediaPlayer = null
+private fun resolveResizeMode(scaleMode: VideoPlayerScaleMode): Int {
+    return when (scaleMode) {
+        VideoPlayerScaleMode.Fit -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        VideoPlayerScaleMode.Crop -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
     }
 }
+
+private fun PlayerView.enableComposeSurfaceSyncWorkaroundIfAvailable() {
+    runCatching {
+        javaClass.getMethod("setEnableComposeSurfaceSyncWorkaround", Boolean::class.javaPrimitiveType)
+            .invoke(this, true)
+    }
+}
+
+private fun readVideoRotationDegrees(path: String): Int? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(path)
+        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+            ?.toIntOrNull()
+            ?: readVideoRotationDegreesFromExtractor(path)
+    } catch (_: Exception) {
+        readVideoRotationDegreesFromExtractor(path)
+    } finally {
+        runCatching { retriever.release() }
+    }
+}
+
+private fun readVideoRotationDegreesFromExtractor(path: String): Int? {
+    val extractor = MediaExtractor()
+    return try {
+        extractor.setDataSource(path)
+        (0 until extractor.trackCount)
+            .asSequence()
+            .map { trackIndex -> extractor.getTrackFormat(trackIndex) }
+            .firstNotNullOfOrNull { format ->
+                val mime = format.getString("mime").orEmpty()
+                if (!mime.startsWith("video/")) {
+                    return@firstNotNullOfOrNull null
+                }
+                when {
+                    format.containsKey("rotation-degrees") -> format.getInteger("rotation-degrees")
+                    else -> null
+                }
+            }
+    } catch (_: Exception) {
+        null
+    } finally {
+        runCatching { extractor.release() }
+    }
+}
+
+private fun Int.normalizeRotationDegrees(): Int = ((this % 360) + 360) % 360
